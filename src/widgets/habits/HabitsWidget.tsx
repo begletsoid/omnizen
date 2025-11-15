@@ -23,7 +23,7 @@ import {
   useHabits,
   useUpdateHabit,
 } from '../../features/habits/hooks';
-import { getNextOrder } from '../../features/habits/utils';
+import { computeHabitReorder } from '../../features/habits/utils';
 
 const STATUS_META: Array<{
   key: HabitStatus;
@@ -119,39 +119,20 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
     const activeHabit = data.find((habit) => habit.id === activeId);
     if (!activeHabit) return;
 
-    const isSameColumn = activeHabit.status === targetStatus;
-    const sourceIndex = grouped[activeHabit.status].findIndex((habit) => habit.id === activeId);
-    const targetList = grouped[targetStatus];
-    const sanitizedTarget = targetList.filter((habit) => habit.id !== activeId);
+    const reorder = computeHabitReorder({
+      activeHabit,
+      targetStatus,
+      overId: over.id ? String(over.id) : undefined,
+      overType,
+      sourceList: grouped[activeHabit.status],
+      targetList: grouped[targetStatus],
+    });
 
-    let insertIndex = sanitizedTarget.length;
-
-    if (overType === 'card') {
-      if (isSameColumn && String(over.id) === activeId) {
-        return;
-      }
-
-      const overIndex = targetList.findIndex((habit) => habit.id === over.id);
-      if (overIndex === -1) return;
-
-      insertIndex = Math.min(overIndex, sanitizedTarget.length);
-    }
-
-    if (isSameColumn) {
-      const originalIndexInSanitized = Math.min(sourceIndex, sanitizedTarget.length);
-      if (insertIndex === originalIndexInSanitized) {
-        return;
-      }
-    }
-
-    const prev = sanitizedTarget[insertIndex - 1];
-    const next = sanitizedTarget[insertIndex];
-    const newOrder = getNextOrder(prev?.order, next?.order);
+    if (!reorder) return;
 
     await updateHabit.mutateAsync({
       id: activeHabit.id,
-      status: targetStatus,
-      order: newOrder,
+      ...reorder,
     });
   };
 
