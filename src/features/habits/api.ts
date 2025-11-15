@@ -1,5 +1,5 @@
 import { supabase } from '../../lib/supabaseClient';
-import type { HabitInsert, HabitRecord, HabitStatus, HabitUpdate } from './types';
+import type { HabitInsert, HabitOrderUpdatePayload, HabitStatus, HabitUpdate } from './types';
 
 if (!supabase) {
   console.warn('Supabase client unavailable - habits API disabled.');
@@ -33,11 +33,19 @@ export async function moveHabit(id: string, status: HabitStatus, order: number) 
   return updateHabit(id, { status, order });
 }
 
-export async function reorderHabits(
-  updates: Array<Pick<HabitRecord, 'id'> & { order: number }>,
-) {
+export async function fetchNextHabitOrder(widgetId: string, status: HabitStatus) {
   if (!supabase) throw new Error('Supabase client unavailable');
-  if (!updates.length) return { data: [], error: null } as const;
+  const { data, error } = await supabase.rpc('next_habit_order', {
+    p_widget_id: widgetId,
+    p_status: status,
+  });
+  if (error) throw error;
+  return data as number;
+}
 
-  return supabase.from('habits').upsert(updates.map(({ id, order }) => ({ id, order }))).select('id,order');
+export async function saveHabitOrders(updates: HabitOrderUpdatePayload[]) {
+  if (!supabase) throw new Error('Supabase client unavailable');
+  if (!updates.length) return;
+  const { error } = await supabase.from('habits').upsert(updates, { onConflict: 'id' });
+  if (error) throw error;
 }

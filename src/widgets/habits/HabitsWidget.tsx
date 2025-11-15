@@ -21,10 +21,10 @@ import {
   useCreateHabit,
   useDeleteHabit,
   useHabits,
-  useReorderHabits,
+  useSaveHabitOrders,
   useUpdateHabit,
 } from '../../features/habits/hooks';
-import { computeHabitReorder } from '../../features/habits/utils';
+import { buildHabitOrderUpdates } from '../../features/habits/utils';
 
 const STATUS_META: Array<{
   key: HabitStatus;
@@ -57,7 +57,7 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
   const { data, isLoading, isError, error } = useHabits(widgetId ?? null);
   const createHabit = useCreateHabit(widgetId ?? null);
   const updateHabit = useUpdateHabit(widgetId ?? null);
-  const reorderHabitsMutation = useReorderHabits(widgetId ?? null);
+  const saveHabitOrders = useSaveHabitOrders(widgetId ?? null);
   const deleteHabit = useDeleteHabit(widgetId ?? null);
 
   const [listHeight, setListHeight] = useState(320);
@@ -110,7 +110,7 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over || !data) return;
+    if (!over || !data || !widgetId) return;
     const activeId = String(active.id);
     const overType = over.data.current?.type as 'card' | 'column' | undefined;
     const targetStatus =
@@ -121,34 +121,33 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
     const activeHabit = data.find((habit) => habit.id === activeId);
     if (!activeHabit) return;
 
-    const reorder = computeHabitReorder({
-      activeHabit,
-      targetStatus,
-      overId: over.id ? String(over.id) : undefined,
-      overType,
-      sourceList: grouped[activeHabit.status],
-      targetList: grouped[targetStatus],
-    });
+    const targetColumn = grouped[targetStatus] ?? [];
+    const sanitizedTarget = targetColumn.filter((habit) => habit.id !== activeId);
+    let insertIndex = sanitizedTarget.length;
 
-    if (!reorder) return;
+    if (overType === 'card') {
+      const overIndexOriginal = targetColumn.findIndex((habit) => habit.id === over.id);
+      const overIndexSanitized = sanitizedTarget.findIndex((habit) => habit.id === over.id);
+      if (overIndexOriginal === -1 || overIndexSanitized === -1) return;
 
-    if (reorder.rebalance?.length) {
-      if (activeHabit.status !== reorder.status) {
-        await updateHabit.mutateAsync({
-          id: activeHabit.id,
-          status: reorder.status,
-          order: reorder.order,
-        });
-      }
-      await reorderHabitsMutation.mutateAsync(reorder.rebalance);
-      return;
+      const sourceIndex = targetColumn.findIndex((habit) => habit.id === activeId);
+      const draggingDownward =
+        targetStatus === activeHabit.status && sourceIndex !== -1 && overIndexOriginal > sourceIndex;
+      insertIndex = Math.min(
+        overIndexSanitized + (draggingDownward ? 1 : 0),
+        sanitizedTarget.length,
+      );
     }
 
-    await updateHabit.mutateAsync({
-      id: activeHabit.id,
-      status: reorder.status,
-      order: reorder.order,
+    const updates = buildHabitOrderUpdates({
+      activeHabit,
+      targetStatus,
+      insertIndex,
+      grouped,
     });
+
+    if (!updates.length) return;
+    await saveHabitOrders.mutateAsync(updates);
   };
 
   if (!ready) {

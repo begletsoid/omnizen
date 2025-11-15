@@ -3,9 +3,16 @@ import { nanoid } from 'nanoid';
 
 import { supabase } from '../../lib/supabaseClient';
 import { useAuthStore } from '../../stores/authStore';
-import { createHabit, deleteHabit, getHabits, moveHabit, reorderHabits, updateHabit } from './api';
-import type { HabitInsert, HabitRecord, HabitStatus } from './types';
-import { getNextOrder } from './utils';
+import {
+  createHabit,
+  deleteHabit,
+  fetchNextHabitOrder,
+  getHabits,
+  moveHabit,
+  saveHabitOrders,
+  updateHabit,
+} from './api';
+import type { HabitInsert, HabitOrderUpdatePayload, HabitRecord, HabitStatus } from './types';
 
 export function useHabits(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
@@ -24,22 +31,16 @@ export function useHabits(widgetId: string | null) {
 export function useCreateHabit(widgetId: string | null) {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
-  const getCachedHabits = () =>
-    (widgetId ? queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]) : null) ?? [];
-
-  const computeNextOrder = (status: HabitStatus) => {
-    const subset = getCachedHabits()
-      .filter((habit) => habit.status === status)
-      .sort((a, b) => a.order - b.order);
-    return getNextOrder(subset.at(-1)?.order);
-  };
 
   return useMutation({
-    mutationFn: async (payload: Omit<HabitInsert, 'widget_id'>) => {
+    mutationFn: async (payload: Omit<HabitInsert, 'widget_id'> & { order?: number }) => {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
       const status = payload.status ?? 'not_started';
-      const order = payload.order ?? computeNextOrder(status);
+      const order = payload.order;
+      if (typeof order !== 'number') {
+        throw new Error('Order is required');
+      }
       const { data, error } = await createHabit({
         widget_id: widgetId,
         user_id: user.id,
@@ -52,12 +53,13 @@ export function useCreateHabit(widgetId: string | null) {
     },
     onMutate: async (variables) => {
       if (!widgetId) return;
-      await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
-      const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
       const targetStatus = variables.status ?? 'not_started';
-      const nextOrder = variables.order ?? computeNextOrder(targetStatus);
+      const nextOrder = await fetchNextHabitOrder(widgetId, targetStatus);
       variables.order = nextOrder;
       variables.status = targetStatus;
+
+      await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
+      const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
       const optimisticId = `temp-${nanoid()}`;
       const optimisticHabit: HabitRecord = {
         id: optimisticId,
@@ -133,33 +135,6 @@ export function useDeleteHabit(widgetId: string | null) {
   });
 }
 
-export function useReorderHabits(widgetId: string | null) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: reorderHabits,
-    onMutate: async (updates: Array<{ id: string; order: number }>) => {
-      if (!widgetId) return;
-      await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
-      const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
-      queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
-        old?.map((habit) => {
-          const update = updates.find((u) => u.id === habit.id);
-          return update ? { ...habit, order: update.order } : habit;
-        }) ?? [],
-      );
-      return { previous };
-    },
-    onError: (_err, _vars, context) => {
-      if (!widgetId || !context?.previous) return;
-      queryClient.setQueryData(['habits', widgetId], context.previous);
-    },
-    onSettled: () => {
-      if (!widgetId) return;
-      queryClient.invalidateQueries({ queryKey: ['habits', widgetId] });
-    },
-  });
-}
-
 export function useMoveHabit(widgetId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -175,6 +150,42 @@ export function useMoveHabit(widgetId: string | null) {
             ? { ...habit, status: variables.status, order: variables.order }
             : habit,
         ) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['habits', widgetId], context.previous);
+    },
+    onSettled: () => {
+      if (!widgetId) return;
+      queryClient.invalidateQueries({ queryKey: ['habits', widgetId] });
+    },
+  });
+}
+
+export function useSaveHabitOrders(widgetId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (updates: HabitOrderUpdatePayload[]) => {
+      if (!widgetId) throw new Error('Widget id missing');
+      return saveHabitOrders(updates);
+    },
+    onMutate: async (updates) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
+      const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
+      const updateMap = new Map(updates.map((u) => [u.id, u]));
+      queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
+        old?.map((habit) => {
+          const update = updateMap.get(habit.id);
+          if (!update) return habit;
+          return {
+            ...habit,
+            order: update.order,
+            status: update.status ?? habit.status,
+          };
+        }) ?? [],
       );
       return { previous };
     },

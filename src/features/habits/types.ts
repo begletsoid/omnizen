@@ -20,3 +20,9 @@ export type HabitInsert = {
 };
 
 export type HabitUpdate = Partial<Pick<HabitRecord, 'title' | 'status' | 'order'>>;
+
+export type HabitOrderUpdatePayload = {
+  id: string;
+  order: number;
+  status?: HabitStatus;
+};

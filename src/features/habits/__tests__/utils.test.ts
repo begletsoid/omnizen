@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { HabitRecord, HabitStatus } from '../types';
-import { computeHabitReorder } from '../utils';
+import { buildHabitOrderUpdates } from '../utils';
+import type { HabitOrderUpdatePayload } from '../types';
 
 function makeHabit(id: string, status: HabitStatus, order: number): HabitRecord {
   return {
@@ -16,121 +17,62 @@ function makeHabit(id: string, status: HabitStatus, order: number): HabitRecord 
   };
 }
 
-describe('computeHabitReorder', () => {
-  const sourceList = [
-    makeHabit('a', 'in_progress', 1),
-    makeHabit('b', 'in_progress', 2),
-    makeHabit('c', 'in_progress', 3),
-    makeHabit('d', 'in_progress', 4),
-    makeHabit('e', 'in_progress', 5),
-  ];
+function buildGrouped() {
+  return {
+    adopted: [makeHabit('x', 'adopted', 1)],
+    in_progress: [
+      makeHabit('a', 'in_progress', 1),
+      makeHabit('b', 'in_progress', 2),
+      makeHabit('c', 'in_progress', 3),
+    ],
+    not_started: [makeHabit('z', 'not_started', 1)],
+  };
+}
 
-  it('moves item to the end of the same column when dropping on column area', () => {
-    const result = computeHabitReorder({
-      activeHabit: sourceList[0],
+describe('buildHabitOrderUpdates', () => {
+  it('переставляет внутри одной колонки', () => {
+    const grouped = buildGrouped();
+    const updates = buildHabitOrderUpdates({
+      activeHabit: grouped.in_progress[0],
       targetStatus: 'in_progress',
-      overType: 'column',
-      sourceList,
-      targetList: sourceList,
+      insertIndex: 2,
+      grouped,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.order).toBeGreaterThan(sourceList.at(-1)!.order);
+    expect(findUpdate(updates, 'a')?.order).toBe(3);
+    expect(findUpdate(updates, 'b')?.order).toBe(1);
+    expect(findUpdate(updates, 'c')?.order).toBe(2);
+    expect(updates.every((u) => u.status === undefined)).toBe(true);
   });
 
-  it('inserts item directly after the target card when dragging downward', () => {
-    const result = computeHabitReorder({
-      activeHabit: sourceList[0],
-      targetStatus: 'in_progress',
-      overType: 'card',
-      overId: 'b',
-      sourceList,
-      targetList: sourceList,
-    });
-
-    expect(result).not.toBeNull();
-    expect(result?.order).toBeGreaterThan(sourceList[1].order);
-    expect(result?.order).toBeLessThan(sourceList[2].order);
-  });
-
-  it('drops deeper in the list without skipping positions', () => {
-    const result = computeHabitReorder({
-      activeHabit: sourceList[0],
-      targetStatus: 'in_progress',
-      overType: 'card',
-      overId: 'd',
-      sourceList,
-      targetList: sourceList,
-    });
-
-    expect(result).not.toBeNull();
-    expect(result?.order).toBeGreaterThan(sourceList[3].order);
-    expect(result?.order).toBeLessThan(sourceList[4].order);
-  });
-
-  it('inserts item before the target card when dragging upward', () => {
-    const result = computeHabitReorder({
-      activeHabit: sourceList[3],
-      targetStatus: 'in_progress',
-      overType: 'card',
-      overId: 'b',
-      sourceList,
-      targetList: sourceList,
-    });
-
-    expect(result).not.toBeNull();
-    expect(result?.order).toBeGreaterThan(sourceList[0].order);
-    expect(result?.order).toBeLessThan(sourceList[1].order);
-  });
-
-  it('returns null when dropping on itself', () => {
-    const result = computeHabitReorder({
-      activeHabit: sourceList[0],
-      targetStatus: 'in_progress',
-      overType: 'card',
-      overId: 'a',
-      sourceList,
-      targetList: sourceList,
-    });
-
-    expect(result).toBeNull();
-  });
-
-  it('computes correct order when moving to another status', () => {
-    const targetList = [
-      makeHabit('x', 'adopted', 10),
-      makeHabit('y', 'adopted', 20),
-    ];
-
-    const result = computeHabitReorder({
-      activeHabit: sourceList[1],
+  it('переносит привычку в другой статус и нумерует обе колонки', () => {
+    const grouped = buildGrouped();
+    const updates = buildHabitOrderUpdates({
+      activeHabit: grouped.in_progress[1],
       targetStatus: 'adopted',
-      overType: 'card',
-      overId: 'x',
-      sourceList,
-      targetList,
+      insertIndex: 1,
+      grouped,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.status).toBe('adopted');
-    expect(result?.order).toBeLessThan(targetList[0].order);
+    expect(findUpdate(updates, 'b')).toMatchObject({ order: 2, status: 'adopted' });
+    expect(findUpdate(updates, 'a')?.order).toBe(1);
+    expect(findUpdate(updates, 'c')?.order).toBe(2);
+    expect(findUpdate(updates, 'x')?.order).toBe(1);
   });
 
-  it('returns rebalance payload when neighbouring orders collide', () => {
-    const zeroList = sourceList.map((habit) => ({ ...habit, order: 0 }));
-    const result = computeHabitReorder({
-      activeHabit: zeroList[0],
+  it('корректно обрабатывает дроп в конец колонки', () => {
+    const grouped = buildGrouped();
+    const updates = buildHabitOrderUpdates({
+      activeHabit: grouped.in_progress[2],
       targetStatus: 'in_progress',
-      overType: 'card',
-      overId: 'b',
-      sourceList: zeroList,
-      targetList: zeroList,
+      insertIndex: 10,
+      grouped,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.rebalance).toHaveLength(zeroList.length);
-    const uniqueOrders = new Set(result?.rebalance?.map((item) => item.order));
-    expect(uniqueOrders.size).toBe(zeroList.length);
+    expect(findUpdate(updates, 'c')?.order).toBe(3);
   });
 });
 
+function findUpdate(updates: HabitOrderUpdatePayload[], id: string) {
+  return updates.find((update) => update.id === id);
+}
