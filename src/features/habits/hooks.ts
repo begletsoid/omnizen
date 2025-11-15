@@ -24,31 +24,47 @@ export function useHabits(widgetId: string | null) {
 export function useCreateHabit(widgetId: string | null) {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
+  const getCachedHabits = () =>
+    (widgetId ? queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]) : null) ?? [];
+
+  const computeNextOrder = (status: HabitStatus) => {
+    const subset = getCachedHabits()
+      .filter((habit) => habit.status === status)
+      .sort((a, b) => a.order - b.order);
+    return getNextOrder(subset.at(-1)?.order);
+  };
 
   return useMutation({
     mutationFn: async (payload: Omit<HabitInsert, 'widget_id'>) => {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
+      const status = payload.status ?? 'not_started';
+      const order = payload.order ?? computeNextOrder(status);
       const { data, error } = await createHabit({
         widget_id: widgetId,
         user_id: user.id,
-        status: 'not_started',
+        status,
+        order,
         ...payload,
       });
       if (error) throw error;
       return data as HabitRecord;
     },
-    onMutate: async ({ title }) => {
+    onMutate: async (variables) => {
       if (!widgetId) return;
       await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
       const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
-      const nextOrder = getNextOrder(previous?.at(-1)?.order);
+      const targetStatus = variables.status ?? 'not_started';
+      const nextOrder = variables.order ?? computeNextOrder(targetStatus);
+      variables.order = nextOrder;
+      variables.status = targetStatus;
+      const optimisticId = `temp-${nanoid()}`;
       const optimisticHabit: HabitRecord = {
-        id: `temp-${nanoid()}`,
+        id: optimisticId,
         widget_id: widgetId,
         user_id: user?.id ?? 'temp-user',
-        title,
-        status: 'not_started',
+        title: variables.title,
+        status: targetStatus,
         order: nextOrder,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -56,17 +72,18 @@ export function useCreateHabit(widgetId: string | null) {
       queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
         old ? [...old, optimisticHabit] : [optimisticHabit],
       );
-      return { previous };
+      return { previous, optimisticId };
     },
     onError: (_err, _vars, context) => {
       if (!widgetId || !context?.previous) return;
       queryClient.setQueryData(['habits', widgetId], context.previous);
     },
-    onSuccess: (data) => {
+    onSuccess: (data, _vars, context) => {
       if (!widgetId) return;
-      queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
-        old?.map((habit) => (habit.id.startsWith('temp-') ? data : habit)) ?? [data],
-      );
+      queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) => {
+        if (!old) return [data];
+        return old.map((habit) => (habit.id === context?.optimisticId ? data : habit));
+      });
     },
   });
 }
