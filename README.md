@@ -17,12 +17,12 @@ npm install
 cp .env.example .env
 ```
 
-Заполните `.env` данными из Supabase:
+Заполните `.env` данными из Supabase (подставьте значения своего проекта):
 
 ```
-VITE_SUPABASE_URL=https://yktrciuznnagegrhkfhm.supabase.co
-VITE_SUPABASE_ANON_KEY=...
-SUPABASE_SERVICE_ROLE_KEY=...
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 ```
 
 Дальше:
@@ -39,7 +39,7 @@ npm run smoke    # интеграционная проверка Supabase (ну�
 
 ```bash
 npx supabase login
-npx supabase link --project-ref yktrciuznnagegrhkfhm
+npx supabase link --project-ref <YOUR_PROJECT_REF>
 npx supabase migration new <name>
 npx supabase db push
 npx supabase db pull   # требует Docker Desktop
@@ -61,7 +61,7 @@ src/
 
 ## Netlify
 
-`netlify.toml` указывает `command = "npm run build"` и `publish = "dist"`. В настройках Netlify добавьте `VITE_SUPABASE_URL` и `VITE_SUPABASE_ANON_KEY`, чтобы продакшн имел доступ к базе. Continuous deployment уже включён через GitHub.
+`netlify.toml` указывает `command = "npm run build"` и `publish = "dist"`. В настройках Netlify добавьте `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`. Так как значения `VITE_*` внедряются в клиентский бандл, добавьте также переменную `SECRETS_SCAN_OMIT_KEYS=VITE_SUPABASE_URL,VITE_SUPABASE_ANON_KEY`, чтобы secrets-scanner не останавливал билд. Continuous deployment уже включён через GitHub.
 
 ## Smoke test
 
