@@ -41,14 +41,20 @@ export function computeHabitReorder({
   let insertIndex = sanitizedTarget.length;
 
   if (overType === 'card') {
+    if (!overId) return null;
     if (isSameColumn && overId === activeHabit.id) {
       return null;
     }
 
-    const overIndex = targetList.findIndex((habit) => habit.id === overId);
-    if (overIndex === -1) return null;
+    const overIndexOriginal = targetList.findIndex((habit) => habit.id === overId);
+    const overIndexSanitized = sanitizedTarget.findIndex((habit) => habit.id === overId);
+    if (overIndexOriginal === -1 || overIndexSanitized === -1) return null;
 
-    insertIndex = Math.min(overIndex, sanitizedTarget.length);
+    const draggingDownward = isSameColumn && overIndexOriginal > sourceIndex;
+    insertIndex = Math.min(
+      overIndexSanitized + (draggingDownward ? 1 : 0),
+      sanitizedTarget.length,
+    );
   }
 
   if (isSameColumn) {

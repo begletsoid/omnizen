@@ -275,7 +275,7 @@ function HabitCard({ habit, onRename, onDelete, pillClass }: HabitCardProps) {
       ref={setNodeRef}
       style={style}
       className={clsx(
-        'flex items-center justify-between gap-2 rounded-full px-4 py-3 text-sm font-semibold shadow-inner transition',
+        'flex items-center justify-between gap-3 rounded-full px-4 py-3 text-sm font-semibold shadow-inner transition',
         pillClass,
       )}
       {...attributes}
@@ -284,22 +284,24 @@ function HabitCard({ habit, onRename, onDelete, pillClass }: HabitCardProps) {
       <p className="truncate" onDoubleClick={() => onRename(habit)}>
         {habit.title}
       </p>
-      <button
-        type="button"
-        onClick={() => onRename(habit)}
-        className="text-xs text-black/70 transition hover:text-black"
-        aria-label="Переименовать"
-      >
-        ✎
-      </button>
-      <button
-        type="button"
-        onClick={onDelete}
-        className="text-xs text-black/70 transition hover:text-black"
-        aria-label="Удалить"
-      >
-        ✕
-      </button>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onRename(habit)}
+          className="text-xs text-black/70 transition hover:text-black"
+          aria-label="Переименовать"
+        >
+          ✎
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="text-xs text-black/70 transition hover:text-black"
+          aria-label="Удалить"
+        >
+          ✕
+        </button>
+      </div>
     </article>
   );
 }

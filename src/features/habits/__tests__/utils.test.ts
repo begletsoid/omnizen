@@ -22,6 +22,7 @@ describe('computeHabitReorder', () => {
     makeHabit('b', 'in_progress', 2),
     makeHabit('c', 'in_progress', 3),
     makeHabit('d', 'in_progress', 4),
+    makeHabit('e', 'in_progress', 5),
   ];
 
   it('moves item to the end of the same column when dropping on column area', () => {
@@ -37,7 +38,7 @@ describe('computeHabitReorder', () => {
     expect(result?.order).toBeGreaterThan(sourceList.at(-1)!.order);
   });
 
-  it('inserts item between cards when dropping on another card', () => {
+  it('inserts item directly after the target card when dragging downward', () => {
     const result = computeHabitReorder({
       activeHabit: sourceList[0],
       targetStatus: 'in_progress',
@@ -50,6 +51,36 @@ describe('computeHabitReorder', () => {
     expect(result).not.toBeNull();
     expect(result?.order).toBeGreaterThan(sourceList[1].order);
     expect(result?.order).toBeLessThan(sourceList[2].order);
+  });
+
+  it('drops deeper in the list without skipping positions', () => {
+    const result = computeHabitReorder({
+      activeHabit: sourceList[0],
+      targetStatus: 'in_progress',
+      overType: 'card',
+      overId: 'd',
+      sourceList,
+      targetList: sourceList,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.order).toBeGreaterThan(sourceList[3].order);
+    expect(result?.order).toBeLessThan(sourceList[4].order);
+  });
+
+  it('inserts item before the target card when dragging upward', () => {
+    const result = computeHabitReorder({
+      activeHabit: sourceList[3],
+      targetStatus: 'in_progress',
+      overType: 'card',
+      overId: 'b',
+      sourceList,
+      targetList: sourceList,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.order).toBeGreaterThan(sourceList[0].order);
+    expect(result?.order).toBeLessThan(sourceList[1].order);
   });
 
   it('returns null when dropping on itself', () => {
