@@ -119,22 +119,33 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
     const activeHabit = data.find((habit) => habit.id === activeId);
     if (!activeHabit) return;
 
-    const targetItems = grouped[targetStatus].filter((habit) => habit.id !== activeId);
-    let insertIndex = targetItems.length;
+    const isSameColumn = activeHabit.status === targetStatus;
+    const sourceIndex = grouped[activeHabit.status].findIndex((habit) => habit.id === activeId);
+    const targetList = grouped[targetStatus];
+    const sanitizedTarget = targetList.filter((habit) => habit.id !== activeId);
+
+    let insertIndex = sanitizedTarget.length;
+
     if (overType === 'card') {
-      const overIndex = targetItems.findIndex((habit) => habit.id === over.id);
-      if (overIndex >= 0) {
-        insertIndex = overIndex;
+      if (isSameColumn && String(over.id) === activeId) {
+        return;
+      }
+
+      const overIndex = targetList.findIndex((habit) => habit.id === over.id);
+      if (overIndex === -1) return;
+
+      insertIndex = Math.min(overIndex, sanitizedTarget.length);
+    }
+
+    if (isSameColumn) {
+      const originalIndexInSanitized = Math.min(sourceIndex, sanitizedTarget.length);
+      if (insertIndex === originalIndexInSanitized) {
+        return;
       }
     }
 
-    const currentIndex = grouped[activeHabit.status].findIndex((habit) => habit.id === activeId);
-    if (activeHabit.status === targetStatus && currentIndex === insertIndex) {
-      return;
-    }
-
-    const prev = targetItems[insertIndex - 1];
-    const next = targetItems[insertIndex];
+    const prev = sanitizedTarget[insertIndex - 1];
+    const next = sanitizedTarget[insertIndex];
     const newOrder = getNextOrder(prev?.order, next?.order);
 
     await updateHabit.mutateAsync({
