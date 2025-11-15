@@ -73,8 +73,15 @@ export function useCreateHabit(widgetId: string | null) {
 export function useUpdateHabit(widgetId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...payload }: { id: string; title?: string; status?: HabitStatus }) =>
-      updateHabit(id, payload),
+    mutationFn: ({
+      id,
+      ...payload
+    }: {
+      id: string;
+      title?: string;
+      status?: HabitStatus;
+      order?: number;
+    }) => updateHabit(id, payload),
     onSuccess: (_, variables) => {
       if (!widgetId) return;
       queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>

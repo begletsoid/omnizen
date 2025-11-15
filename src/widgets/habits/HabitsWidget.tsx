@@ -1,4 +1,19 @@
 import { useMemo, useState } from 'react';
+import {
+  closestCorners,
+  DndContext,
+  PointerSensor,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import type { DragEndEvent } from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import clsx from 'clsx';
 
 import type { HabitRecord, HabitStatus } from '../../features/habits/types';
@@ -8,6 +23,7 @@ import {
   useHabits,
   useUpdateHabit,
 } from '../../features/habits/hooks';
+import { getNextOrder } from '../../features/habits/utils';
 
 const STATUS_META: Array<{
   key: HabitStatus;
@@ -76,6 +92,50 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
     await updateHabit.mutateAsync({ id: habit.id, status });
   };
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 6 },
+    }),
+  );
+
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || !data) return;
+    const activeId = String(active.id);
+    const overType = over.data.current?.type as 'card' | 'column' | undefined;
+    const targetStatus =
+      (over.data.current?.status as HabitStatus | undefined) ??
+      STATUS_META.find((meta) => meta.key === over.id)?.key;
+    if (!targetStatus) return;
+
+    const activeHabit = data.find((habit) => habit.id === activeId);
+    if (!activeHabit) return;
+
+    const targetItems = grouped[targetStatus].filter((habit) => habit.id !== activeId);
+    let insertIndex = targetItems.length;
+    if (overType === 'card') {
+      const overIndex = targetItems.findIndex((habit) => habit.id === over.id);
+      if (overIndex >= 0) {
+        insertIndex = overIndex;
+      }
+    }
+
+    const currentIndex = grouped[activeHabit.status].findIndex((habit) => habit.id === activeId);
+    if (activeHabit.status === targetStatus && currentIndex === insertIndex) {
+      return;
+    }
+
+    const prev = targetItems[insertIndex - 1];
+    const next = targetItems[insertIndex];
+    const newOrder = getNextOrder(prev?.order, next?.order);
+
+    await updateHabit.mutateAsync({
+      id: activeHabit.id,
+      status: targetStatus,
+      order: newOrder,
+    });
+  };
+
   if (!ready) {
     return (
       <section className="glass-panel flex flex-col gap-2 px-5 py-6">
@@ -128,67 +188,141 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
         </p>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        {STATUS_META.map((status) => (
-          <div key={status.key} className="flex flex-col gap-3 rounded-2xl border p-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-text">
-                {status.label}
-              </h3>
-              <span className="text-xs text-muted">{grouped[status.key].length}</span>
-            </div>
-            <div className={clsx('flex flex-col gap-2')}>
-              {grouped[status.key].length === 0 ? (
-                <p className="text-xs text-muted/70">Нет привычек</p>
-              ) : (
-                grouped[status.key].map((habit) => (
-                  <article
-                    key={habit.id}
-                    className="rounded-xl border border-border/60 bg-background/40 px-3 py-2 text-sm text-text shadow-inner"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">{habit.title}</p>
-                      <div className="flex items-center gap-1 text-xs text-muted">
-                        <button
-                          type="button"
-                          onClick={() => handleRename(habit)}
-                          className="transition hover:text-text"
-                        >
-                          Изм.
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => deleteHabit.mutate(habit.id)}
-                          className="transition hover:text-rose-400"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-                      <label className="text-muted">Статус</label>
-                      <select
-                        value={habit.status}
-                        onChange={(evt) =>
-                          handleStatusChange(habit, evt.target.value as HabitStatus)
-                        }
-                        className="rounded-md border border-border bg-transparent px-2 py-1 text-xs text-text"
-                      >
-                        {STATUS_META.map(({ key, label }) => (
-                          <option key={key} value={key}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </article>
-                ))
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCorners}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="grid gap-4 sm:grid-cols-3">
+          {STATUS_META.map((status) => (
+            <Column
+              key={status.key}
+              status={status.key}
+              count={grouped[status.key].length}
+              label={status.label}
+            >
+              <SortableContext
+                items={grouped[status.key].map((habit) => habit.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                {grouped[status.key].length === 0 ? (
+                  <p className="text-xs text-muted/70">Нет привычек</p>
+                ) : (
+                  grouped[status.key].map((habit) => (
+                    <HabitCard
+                      key={habit.id}
+                      habit={habit}
+                      onRename={handleRename}
+                      onDelete={() => deleteHabit.mutate(habit.id)}
+                      onStatusChange={handleStatusChange}
+                    />
+                  ))
+                )}
+              </SortableContext>
+            </Column>
+          ))}
+        </div>
+      </DndContext>
     </section>
+  );
+}
+
+type ColumnProps = {
+  status: HabitStatus;
+  label: string;
+  count: number;
+  children: React.ReactNode;
+};
+
+function Column({ status, label, count, children }: ColumnProps) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: status,
+    data: {
+      type: 'column',
+      status,
+    },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={clsx(
+        'flex flex-col gap-3 rounded-2xl border p-4',
+        isOver && 'border-accent/50 bg-background/40',
+      )}
+    >
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-text">{label}</h3>
+        <span className="text-xs text-muted">{count}</span>
+      </div>
+      <div className="flex flex-col gap-2">{children}</div>
+    </div>
+  );
+}
+
+type HabitCardProps = {
+  habit: HabitRecord;
+  onRename: (habit: HabitRecord) => void;
+  onDelete: () => void;
+  onStatusChange: (habit: HabitRecord, status: HabitStatus) => void;
+};
+
+function HabitCard({ habit, onRename, onDelete, onStatusChange }: HabitCardProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: habit.id,
+    data: {
+      type: 'card',
+      status: habit.status,
+    },
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  };
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      className="rounded-xl border border-border/60 bg-background/40 px-3 py-2 text-sm text-text shadow-inner"
+      {...attributes}
+      {...listeners}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-medium">{habit.title}</p>
+        <div className="flex items-center gap-1 text-xs text-muted">
+          <button type="button" onClick={() => onRename(habit)} className="transition hover:text-text">
+            Изм.
+          </button>
+          <button type="button" onClick={onDelete} className="transition hover:text-rose-400">
+            ✕
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+        <label className="text-muted">Статус</label>
+        <select
+          value={habit.status}
+          onChange={(evt) => onStatusChange(habit, evt.target.value as HabitStatus)}
+          className="rounded-md border border-border bg-transparent px-2 py-1 text-xs text-text"
+        >
+          {STATUS_META.map(({ key, label }) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </article>
   );
 }
 
