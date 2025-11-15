@@ -27,25 +27,21 @@ import { getNextOrder } from '../../features/habits/utils';
 
 const STATUS_META: Array<{
   key: HabitStatus;
-  label: string;
   accent: string;
   pill: string;
 }> = [
   {
     key: 'adopted',
-    label: 'Внедрено',
     accent: 'border-emerald-400/50',
     pill: 'bg-emerald-400/80 text-emerald-950',
   },
   {
     key: 'in_progress',
-    label: 'Внедряется',
     accent: 'border-amber-400/50',
     pill: 'bg-amber-300 text-amber-900',
   },
   {
     key: 'not_started',
-    label: 'Не внедрено',
     accent: 'border-rose-400/50',
     pill: 'bg-rose-400 text-rose-50',
   },
@@ -53,10 +49,9 @@ const STATUS_META: Array<{
 
 type HabitsWidgetProps = {
   widgetId: string | null;
-  title?: string;
 };
 
-export function HabitsWidget({ widgetId, title = 'Лента привычек' }: HabitsWidgetProps) {
+export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
   const ready = Boolean(widgetId);
   const { data, isLoading, isError, error } = useHabits(widgetId ?? null);
   const createHabit = useCreateHabit(widgetId ?? null);
@@ -105,11 +100,6 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
     await updateHabit.mutateAsync({ id: habit.id, title: nextTitle });
   };
 
-  const handleStatusChange = async (habit: HabitRecord, status: HabitStatus) => {
-    if (status === habit.status) return;
-    await updateHabit.mutateAsync({ id: habit.id, status });
-  };
-
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -156,20 +146,14 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
 
   if (!ready) {
     return (
-      <section className="glass-panel flex flex-col gap-2 px-5 py-6">
-        <h2 className="text-lg font-semibold text-muted">Лента привычек</h2>
+    <section className="glass-panel flex flex-col gap-2 px-5 py-6">
         <p className="text-sm text-muted">Виджет пока не готов — обновите страницу.</p>
       </section>
     );
   }
 
   return (
-    <section className="glass-panel flex flex-col gap-4 border border-border bg-surface/80 px-4 py-5 shadow-card">
-      <header className="flex flex-col gap-1">
-        <p className="text-xs uppercase tracking-[0.4em] text-muted">виджет</p>
-        <h2 className="text-2xl font-semibold text-text">{title}</h2>
-      </header>
-
+    <section className="glass-panel mx-auto flex w-full max-w-sm flex-col gap-4 border border-border bg-surface/80 px-3 py-4 shadow-card">
       {isLoading && <p className="text-sm text-muted">Загружаем привычки…</p>}
       {isError && (
         <p className="text-sm text-rose-400">
@@ -190,35 +174,24 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
 
       <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
         <div
-          className="rounded-3xl border border-border/60 bg-background/40 px-3 pb-4 pt-2"
+          className="rounded-3xl border border-border/40 bg-background/30 px-3 pb-4 pt-2"
           style={{ maxHeight: listHeight, overflowY: 'auto' }}
         >
           {STATUS_META.map((status) => (
-            <Column
-              key={status.key}
-              status={status.key}
-              count={grouped[status.key].length}
-              label={status.label}
-              accent={status.accent}
-            >
+            <Column key={status.key} status={status.key} accent={status.accent}>
               <SortableContext
                 items={grouped[status.key].map((habit) => habit.id)}
                 strategy={verticalListSortingStrategy}
               >
-                {grouped[status.key].length === 0 ? (
-                  <p className="text-xs text-muted/70">Нет привычек</p>
-                ) : (
-                  grouped[status.key].map((habit) => (
-                    <HabitCard
-                      key={habit.id}
-                      habit={habit}
-                      pillClass={status.pill}
-                      onRename={handleRename}
-                      onDelete={() => deleteHabit.mutate(habit.id)}
-                      onStatusChange={handleStatusChange}
-                    />
-                  ))
-                )}
+                {grouped[status.key].map((habit) => (
+                  <HabitCard
+                    key={habit.id}
+                    habit={habit}
+                    pillClass={status.pill}
+                    onRename={handleRename}
+                    onDelete={() => deleteHabit.mutate(habit.id)}
+                  />
+                ))}
               </SortableContext>
             </Column>
           ))}
@@ -249,13 +222,11 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
 
 type ColumnProps = {
   status: HabitStatus;
-  label: string;
-  count: number;
   accent: string;
   children: React.ReactNode;
 };
 
-function Column({ status, label, count, accent, children }: ColumnProps) {
+function Column({ status, accent, children }: ColumnProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: status,
     data: {
@@ -265,20 +236,16 @@ function Column({ status, label, count, accent, children }: ColumnProps) {
   });
 
   return (
-    <section
+    <div
       ref={setNodeRef}
       className={clsx(
-        'flex flex-col gap-3 rounded-2xl border bg-transparent p-3',
+        'flex flex-col gap-2 rounded-3xl border border-transparent bg-transparent p-2',
         accent,
-        isOver && 'border-accent/70 bg-white/20',
+        isOver && 'border-accent/70 bg-white/10',
       )}
     >
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-text">{label}</h3>
-        <span className="text-xs text-muted">{count}</span>
-      </div>
-      <div className="flex flex-col gap-2">{children}</div>
-    </section>
+      <div className="flex flex-col gap-2 min-h-[1rem]">{children}</div>
+    </div>
   );
 }
 
@@ -287,10 +254,9 @@ type HabitCardProps = {
   pillClass: string;
   onRename: (habit: HabitRecord) => void;
   onDelete: () => void;
-  onStatusChange: (habit: HabitRecord, status: HabitStatus) => void;
 };
 
-function HabitCard({ habit, onRename, onDelete, onStatusChange, pillClass }: HabitCardProps) {
+function HabitCard({ habit, onRename, onDelete, pillClass }: HabitCardProps) {
   const {
     attributes,
     listeners,
@@ -317,7 +283,7 @@ function HabitCard({ habit, onRename, onDelete, onStatusChange, pillClass }: Hab
       ref={setNodeRef}
       style={style}
       className={clsx(
-        'flex items-center justify-between rounded-full px-4 py-3 text-sm font-semibold shadow-inner transition',
+        'flex items-center justify-between gap-2 rounded-full px-4 py-3 text-sm font-semibold shadow-inner transition',
         pillClass,
       )}
       {...attributes}
@@ -326,25 +292,22 @@ function HabitCard({ habit, onRename, onDelete, onStatusChange, pillClass }: Hab
       <p className="truncate" onDoubleClick={() => onRename(habit)}>
         {habit.title}
       </p>
-      <div className="flex items-center gap-1 text-xs text-black/60">
-        <button type="button" onClick={() => onRename(habit)} className="transition hover:text-black">
-          ✎
-        </button>
-        <button type="button" onClick={onDelete} className="transition hover:text-black">
-          ✕
-        </button>
-        <select
-          value={habit.status}
-          onChange={(evt) => onStatusChange(habit, evt.target.value as HabitStatus)}
-          className="rounded-md border border-white/60 bg-white/30 px-2 py-1 text-xs text-black/70 outline-none"
-        >
-          {STATUS_META.map(({ key, label }) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </div>
+      <button
+        type="button"
+        onClick={() => onRename(habit)}
+        className="text-xs text-black/70 transition hover:text-black"
+        aria-label="Переименовать"
+      >
+        ✎
+      </button>
+      <button
+        type="button"
+        onClick={onDelete}
+        className="text-xs text-black/70 transition hover:text-black"
+        aria-label="Удалить"
+      >
+        ✕
+      </button>
     </article>
   );
 }

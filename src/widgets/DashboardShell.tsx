@@ -82,10 +82,7 @@ export function DashboardShell() {
       </header>
 
       <main className="grid gap-6 px-6 pb-16">
-        <HabitsWidget
-          widgetId={habitsWidget?.id ?? null}
-          title={(habitsWidget?.config as { title?: string } | undefined)?.title ?? 'Лента привычек'}
-        />
+        <HabitsWidget widgetId={habitsWidget?.id ?? null} />
         <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-3">
           {placeholderBlueprints.map((widget) => (
             <WidgetPlaceholder key={widget.title} {...widget} />
