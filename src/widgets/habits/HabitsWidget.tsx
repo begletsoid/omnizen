@@ -29,10 +29,26 @@ const STATUS_META: Array<{
   key: HabitStatus;
   label: string;
   accent: string;
+  pill: string;
 }> = [
-  { key: 'adopted', label: 'Внедрено', accent: 'border-emerald-500/40' },
-  { key: 'in_progress', label: 'Внедряется', accent: 'border-amber-500/40' },
-  { key: 'not_started', label: 'Не внедрено', accent: 'border-rose-500/40' },
+  {
+    key: 'adopted',
+    label: 'Внедрено',
+    accent: 'border-emerald-400/50',
+    pill: 'bg-emerald-400/80 text-emerald-950',
+  },
+  {
+    key: 'in_progress',
+    label: 'Внедряется',
+    accent: 'border-amber-400/50',
+    pill: 'bg-amber-300 text-amber-900',
+  },
+  {
+    key: 'not_started',
+    label: 'Не внедрено',
+    accent: 'border-rose-400/50',
+    pill: 'bg-rose-400 text-rose-50',
+  },
 ];
 
 type HabitsWidgetProps = {
@@ -47,8 +63,7 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
   const updateHabit = useUpdateHabit(widgetId ?? null);
   const deleteHabit = useDeleteHabit(widgetId ?? null);
 
-  const [newTitle, setNewTitle] = useState('');
-  const [newStatus, setNewStatus] = useState<HabitStatus>('not_started');
+  const [listHeight, setListHeight] = useState(320);
 
   const grouped = useMemo(() => {
     const initial = STATUS_META.reduce<Record<HabitStatus, HabitRecord[]>>(
@@ -73,12 +88,15 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
     return initial;
   }, [data]);
 
-  const handleCreate = async (evt: React.FormEvent) => {
-    evt.preventDefault();
-    if (!newTitle.trim() || !widgetId) return;
-    await createHabit.mutateAsync({ title: newTitle.trim(), status: newStatus });
-    setNewTitle('');
-    setNewStatus('not_started');
+  const adjustHeight = (delta: number) => {
+    setListHeight((prev) => Math.max(180, Math.min(540, prev + delta)));
+  };
+
+  const handleCreate = async () => {
+    if (!widgetId) return;
+    const titlePrompt = window.prompt('Название новой привычки', 'Новая привычка');
+    if (!titlePrompt || !titlePrompt.trim()) return;
+    await createHabit.mutateAsync({ title: titlePrompt.trim(), status: 'not_started' });
   };
 
   const handleRename = async (habit: HabitRecord) => {
@@ -146,39 +164,10 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
   }
 
   return (
-    <section className="glass-panel flex flex-col gap-6 border border-border bg-surface/80 px-5 py-6 shadow-card">
-      <header className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.4em] text-muted">виджет</p>
-          <h2 className="text-2xl font-semibold text-text">{title}</h2>
-        </div>
-        <form onSubmit={handleCreate} className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            type="text"
-            value={newTitle}
-            onChange={(evt) => setNewTitle(evt.target.value)}
-            placeholder="Новая привычка"
-            className="rounded-md border border-border bg-transparent px-3 py-2 text-sm text-text outline-none focus:border-accent"
-          />
-          <select
-            value={newStatus}
-            onChange={(evt) => setNewStatus(evt.target.value as HabitStatus)}
-            className="rounded-md border border-border bg-surface px-2 py-2 text-sm text-text outline-none"
-          >
-            {STATUS_META.map(({ key, label }) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <button
-            type="submit"
-            disabled={!newTitle.trim() || createHabit.isPending}
-            className="rounded-md bg-accent/20 px-4 py-2 text-sm font-semibold text-accent transition hover:bg-accent/30 disabled:opacity-50"
-          >
-            Добавить
-          </button>
-        </form>
+    <section className="glass-panel flex flex-col gap-4 border border-border bg-surface/80 px-4 py-5 shadow-card">
+      <header className="flex flex-col gap-1">
+        <p className="text-xs uppercase tracking-[0.4em] text-muted">виджет</p>
+        <h2 className="text-2xl font-semibold text-text">{title}</h2>
       </header>
 
       {isLoading && <p className="text-sm text-muted">Загружаем привычки…</p>}
@@ -188,18 +177,29 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
         </p>
       )}
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCorners}
-        onDragEnd={handleDragEnd}
-      >
-        <div className="grid gap-4 sm:grid-cols-3">
+      <div className="flex justify-center">
+        <button
+          type="button"
+          onClick={() => adjustHeight(-60)}
+          className="flex h-10 w-16 items-center justify-center rounded-full border border-border bg-gradient-to-b from-white/30 to-white/5 text-xl text-muted transition hover:text-text"
+          aria-label="Уменьшить высоту"
+        >
+          ▲
+        </button>
+      </div>
+
+      <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
+        <div
+          className="rounded-3xl border border-border/60 bg-background/40 px-3 pb-4 pt-2"
+          style={{ maxHeight: listHeight, overflowY: 'auto' }}
+        >
           {STATUS_META.map((status) => (
             <Column
               key={status.key}
               status={status.key}
               count={grouped[status.key].length}
               label={status.label}
+              accent={status.accent}
             >
               <SortableContext
                 items={grouped[status.key].map((habit) => habit.id)}
@@ -212,6 +212,7 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
                     <HabitCard
                       key={habit.id}
                       habit={habit}
+                      pillClass={status.pill}
                       onRename={handleRename}
                       onDelete={() => deleteHabit.mutate(habit.id)}
                       onStatusChange={handleStatusChange}
@@ -223,6 +224,25 @@ export function HabitsWidget({ widgetId, title = 'Лента привычек' }
           ))}
         </div>
       </DndContext>
+
+      <div className="flex items-center justify-center gap-3">
+        <button
+          type="button"
+          onClick={() => adjustHeight(60)}
+          className="flex h-10 w-16 items-center justify-center rounded-full border border-border bg-gradient-to-t from-white/30 to-white/5 text-xl text-muted transition hover:text-text"
+          aria-label="Увеличить высоту"
+        >
+          ▼
+        </button>
+        <button
+          type="button"
+          onClick={handleCreate}
+          className="flex h-10 w-10 items-center justify-center rounded-full border border-accent bg-accent/20 text-2xl text-accent transition hover:bg-accent/30"
+          aria-label="Добавить привычку"
+        >
+          +
+        </button>
+      </div>
     </section>
   );
 }
@@ -231,10 +251,11 @@ type ColumnProps = {
   status: HabitStatus;
   label: string;
   count: number;
+  accent: string;
   children: React.ReactNode;
 };
 
-function Column({ status, label, count, children }: ColumnProps) {
+function Column({ status, label, count, accent, children }: ColumnProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: status,
     data: {
@@ -244,11 +265,12 @@ function Column({ status, label, count, children }: ColumnProps) {
   });
 
   return (
-    <div
+    <section
       ref={setNodeRef}
       className={clsx(
-        'flex flex-col gap-3 rounded-2xl border p-4',
-        isOver && 'border-accent/50 bg-background/40',
+        'flex flex-col gap-3 rounded-2xl border bg-transparent p-3',
+        accent,
+        isOver && 'border-accent/70 bg-white/20',
       )}
     >
       <div className="flex items-center justify-between">
@@ -256,18 +278,19 @@ function Column({ status, label, count, children }: ColumnProps) {
         <span className="text-xs text-muted">{count}</span>
       </div>
       <div className="flex flex-col gap-2">{children}</div>
-    </div>
+    </section>
   );
 }
 
 type HabitCardProps = {
   habit: HabitRecord;
+  pillClass: string;
   onRename: (habit: HabitRecord) => void;
   onDelete: () => void;
   onStatusChange: (habit: HabitRecord, status: HabitStatus) => void;
 };
 
-function HabitCard({ habit, onRename, onDelete, onStatusChange }: HabitCardProps) {
+function HabitCard({ habit, onRename, onDelete, onStatusChange, pillClass }: HabitCardProps) {
   const {
     attributes,
     listeners,
@@ -293,27 +316,27 @@ function HabitCard({ habit, onRename, onDelete, onStatusChange }: HabitCardProps
     <article
       ref={setNodeRef}
       style={style}
-      className="rounded-xl border border-border/60 bg-background/40 px-3 py-2 text-sm text-text shadow-inner"
+      className={clsx(
+        'flex items-center justify-between rounded-full px-4 py-3 text-sm font-semibold shadow-inner transition',
+        pillClass,
+      )}
       {...attributes}
       {...listeners}
     >
-      <div className="flex items-center justify-between gap-2">
-        <p className="font-medium">{habit.title}</p>
-        <div className="flex items-center gap-1 text-xs text-muted">
-          <button type="button" onClick={() => onRename(habit)} className="transition hover:text-text">
-            Изм.
-          </button>
-          <button type="button" onClick={onDelete} className="transition hover:text-rose-400">
-            ✕
-          </button>
-        </div>
-      </div>
-      <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-        <label className="text-muted">Статус</label>
+      <p className="truncate" onDoubleClick={() => onRename(habit)}>
+        {habit.title}
+      </p>
+      <div className="flex items-center gap-1 text-xs text-black/60">
+        <button type="button" onClick={() => onRename(habit)} className="transition hover:text-black">
+          ✎
+        </button>
+        <button type="button" onClick={onDelete} className="transition hover:text-black">
+          ✕
+        </button>
         <select
           value={habit.status}
           onChange={(evt) => onStatusChange(habit, evt.target.value as HabitStatus)}
-          className="rounded-md border border-border bg-transparent px-2 py-1 text-xs text-text"
+          className="rounded-md border border-white/60 bg-white/30 px-2 py-1 text-xs text-black/70 outline-none"
         >
           {STATUS_META.map(({ key, label }) => (
             <option key={key} value={key}>
@@ -325,4 +348,3 @@ function HabitCard({ habit, onRename, onDelete, onStatusChange }: HabitCardProps
     </article>
   );
 }
-
