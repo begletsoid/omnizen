@@ -1,16 +1,12 @@
 import { AuthButton } from '../components/AuthButton';
 import { useBootstrapDashboard } from '../features/dashboards/hooks';
 import { useAuthStore } from '../stores/authStore';
+import { HabitsWidget } from './habits/HabitsWidget';
 
 import { WidgetPlaceholder } from './WidgetPlaceholder';
 import type { WidgetPlaceholderProps } from './WidgetPlaceholder';
 
-const widgetBlueprints = [
-  {
-    title: 'Лента привычек',
-    description: 'Drag & drop список привычек с тремя статусами и регулировкой высоты.',
-    accent: 'green',
-  },
+const placeholderBlueprints: WidgetPlaceholderProps[] = [
   {
     title: 'Проблемы / Решения',
     description: 'Таблица проблем и альтернативных решений с редактированием по месту.',
@@ -26,7 +22,7 @@ const widgetBlueprints = [
     description: 'Загрузка изображений, перемещение и изменение размеров.',
     accent: 'pink',
   },
-] satisfies WidgetPlaceholderProps[];
+];
 
 export function DashboardShell() {
   const user = useAuthStore((state) => state.user);
@@ -39,6 +35,7 @@ export function DashboardShell() {
   } = useBootstrapDashboard(userId);
   const userLabel =
     user?.user_metadata?.full_name ?? user?.email ?? (user ? `id: ${user.id}` : 'Гость');
+  const habitsWidget = bootstrap?.widgets.find((widget) => widget.type === 'habits');
 
   return (
     <div className="min-h-screen bg-background text-text">
@@ -84,10 +81,16 @@ export function DashboardShell() {
         </div>
       </header>
 
-      <main className="grid gap-6 px-6 pb-16 lg:grid-cols-2 xl:grid-cols-3">
-        {widgetBlueprints.map((widget) => (
-          <WidgetPlaceholder key={widget.title} {...widget} />
-        ))}
+      <main className="grid gap-6 px-6 pb-16">
+        <HabitsWidget
+          widgetId={habitsWidget?.id ?? null}
+          title={(habitsWidget?.config as { title?: string } | undefined)?.title ?? 'Лента привычек'}
+        />
+        <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-3">
+          {placeholderBlueprints.map((widget) => (
+            <WidgetPlaceholder key={widget.title} {...widget} />
+          ))}
+        </div>
       </main>
     </div>
   );

@@ -6,6 +6,9 @@ import { DashboardShell } from '../DashboardShell';
 import { useAuthStore } from '../../stores/authStore';
 
 vi.mock('../../lib/supabaseClient', () => ({ supabase: undefined }));
+vi.mock('../habits/HabitsWidget', () => ({
+  HabitsWidget: () => <div data-testid="habits-widget" />,
+}));
 vi.mock('../../features/dashboards/hooks', () => ({
   useBootstrapDashboard: () => ({
     data: undefined,
