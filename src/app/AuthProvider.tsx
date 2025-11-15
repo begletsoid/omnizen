@@ -1,4 +1,5 @@
-import { PropsWithChildren, useEffect } from 'react';
+import type { PropsWithChildren } from 'react';
+import { useEffect } from 'react';
 
 import { supabase } from '../lib/supabaseClient';
 import { useAuthStore } from '../stores/authStore';

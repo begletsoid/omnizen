@@ -3,6 +3,7 @@ import { useBootstrapDashboard } from '../features/dashboards/hooks';
 import { useAuthStore } from '../stores/authStore';
 
 import { WidgetPlaceholder } from './WidgetPlaceholder';
+import type { WidgetPlaceholderProps } from './WidgetPlaceholder';
 
 const widgetBlueprints = [
   {
@@ -25,7 +26,7 @@ const widgetBlueprints = [
     description: 'Загрузка изображений, перемещение и изменение размеров.',
     accent: 'pink',
   },
-];
+] satisfies WidgetPlaceholderProps[];
 
 export function DashboardShell() {
   const user = useAuthStore((state) => state.user);

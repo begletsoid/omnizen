@@ -53,11 +53,18 @@ export function useDashboardLayout(dashboardId: string | null) {
     [mutation],
   );
 
-  useEffect(() => () => timerRef.current && clearTimeout(timerRef.current), []);
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
 
   return {
     ...query,
     saveLayout: scheduleSave,
-    isSaving: mutation.isLoading,
+    isSaving: mutation.status === 'pending',
   } as const;
 }
