@@ -16,6 +16,7 @@ export type HabitInsert = {
   title: string;
   status?: HabitStatus;
   order?: number;
+  user_id?: string;
 };
 
 export type HabitUpdate = Partial<Pick<HabitRecord, 'title' | 'status' | 'order'>>;

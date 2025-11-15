@@ -31,6 +31,7 @@ export function useCreateHabit(widgetId: string | null) {
       if (!user) throw new Error('User not authenticated');
       const { data, error } = await createHabit({
         widget_id: widgetId,
+        user_id: user.id,
         status: 'not_started',
         ...payload,
       });
