@@ -25,6 +25,12 @@ type ReorderInput = {
   targetList: HabitRecord[];
 };
 
+type ReorderResult = {
+  status: HabitStatus;
+  order: number;
+  rebalance?: Array<{ id: string; order: number }>;
+};
+
 export function computeHabitReorder({
   activeHabit,
   targetStatus,
@@ -32,7 +38,7 @@ export function computeHabitReorder({
   overType,
   sourceList,
   targetList,
-}: ReorderInput) {
+}: ReorderInput): ReorderResult | null {
   const isSameColumn = activeHabit.status === targetStatus;
   const sourceIndex = sourceList.findIndex((habit) => habit.id === activeHabit.id);
   if (sourceIndex === -1) return null;
@@ -67,6 +73,33 @@ export function computeHabitReorder({
   const prev = sanitizedTarget[insertIndex - 1];
   const next = sanitizedTarget[insertIndex];
   const newOrder = getNextOrder(prev?.order, next?.order);
+
+  const targetSequence = sanitizedTarget.slice();
+  targetSequence.splice(insertIndex, 0, {
+    ...activeHabit,
+    status: targetStatus,
+    order: newOrder,
+  });
+
+  const requiresRebalance = targetSequence.some(
+    (habit, index, arr) => index > 0 && arr[index - 1].order >= habit.order,
+  );
+
+  if (requiresRebalance) {
+    const baseStep = 1000;
+    const rebalance = targetSequence.map((habit, index) => ({
+      id: habit.id,
+      order: (index + 1) * baseStep,
+    }));
+
+    const activeOrder = rebalance.find((item) => item.id === activeHabit.id)?.order ?? newOrder;
+
+    return {
+      status: targetStatus,
+      order: activeOrder,
+      rebalance,
+    };
+  }
 
   return {
     status: targetStatus,

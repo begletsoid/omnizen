@@ -115,5 +115,22 @@ describe('computeHabitReorder', () => {
     expect(result?.status).toBe('adopted');
     expect(result?.order).toBeLessThan(targetList[0].order);
   });
+
+  it('returns rebalance payload when neighbouring orders collide', () => {
+    const zeroList = sourceList.map((habit) => ({ ...habit, order: 0 }));
+    const result = computeHabitReorder({
+      activeHabit: zeroList[0],
+      targetStatus: 'in_progress',
+      overType: 'card',
+      overId: 'b',
+      sourceList: zeroList,
+      targetList: zeroList,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.rebalance).toHaveLength(zeroList.length);
+    const uniqueOrders = new Set(result?.rebalance?.map((item) => item.order));
+    expect(uniqueOrders.size).toBe(zeroList.length);
+  });
 });
 

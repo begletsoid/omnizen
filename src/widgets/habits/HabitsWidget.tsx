@@ -21,6 +21,7 @@ import {
   useCreateHabit,
   useDeleteHabit,
   useHabits,
+  useReorderHabits,
   useUpdateHabit,
 } from '../../features/habits/hooks';
 import { computeHabitReorder } from '../../features/habits/utils';
@@ -56,6 +57,7 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
   const { data, isLoading, isError, error } = useHabits(widgetId ?? null);
   const createHabit = useCreateHabit(widgetId ?? null);
   const updateHabit = useUpdateHabit(widgetId ?? null);
+  const reorderHabitsMutation = useReorderHabits(widgetId ?? null);
   const deleteHabit = useDeleteHabit(widgetId ?? null);
 
   const [listHeight, setListHeight] = useState(320);
@@ -130,9 +132,22 @@ export function HabitsWidget({ widgetId }: HabitsWidgetProps) {
 
     if (!reorder) return;
 
+    if (reorder.rebalance?.length) {
+      if (activeHabit.status !== reorder.status) {
+        await updateHabit.mutateAsync({
+          id: activeHabit.id,
+          status: reorder.status,
+          order: reorder.order,
+        });
+      }
+      await reorderHabitsMutation.mutateAsync(reorder.rebalance);
+      return;
+    }
+
     await updateHabit.mutateAsync({
       id: activeHabit.id,
-      ...reorder,
+      status: reorder.status,
+      order: reorder.order,
     });
   };
 
