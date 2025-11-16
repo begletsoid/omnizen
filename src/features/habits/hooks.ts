@@ -169,7 +169,23 @@ export function useSaveHabitOrders(widgetId: string | null) {
   return useMutation({
     mutationFn: (updates: HabitOrderUpdatePayload[]) => {
       if (!widgetId) throw new Error('Widget id missing');
-      return saveHabitOrders(updates);
+      const cached = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]) ?? [];
+      const ensured = updates.map((update) => {
+        if (update.title && update.user_id && update.widget_id) {
+          return update;
+        }
+        const source = cached.find((habit) => habit.id === update.id);
+        if (!source) {
+          throw new Error(`Habit ${update.id} not found in cache`);
+        }
+        return {
+          ...update,
+          title: source.title,
+          user_id: source.user_id,
+          widget_id: source.widget_id,
+        };
+      });
+      return saveHabitOrders(ensured);
     },
     onMutate: async (updates) => {
       if (!widgetId) return;

@@ -10,6 +10,7 @@ import {
 import type { DragEndEvent } from '@dnd-kit/core';
 import {
   SortableContext,
+  defaultAnimateLayoutChanges,
   useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
@@ -263,25 +264,27 @@ type HabitCardProps = {
 };
 
 function HabitCard({ habit, onRename, onDelete, pillClass }: HabitCardProps) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: habit.id,
     data: {
       type: 'card',
       status: habit.status,
     },
+    animateLayoutChanges: (args) => {
+      if (args.isSorting || args.wasDragging) {
+        return false;
+      }
+      return defaultAnimateLayoutChanges(args);
+    },
   });
 
   const style = {
     transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.6 : 1,
+    transition: isDragging
+      ? 'transform 120ms ease-out'
+      : transition ?? 'transform 200ms cubic-bezier(0.2, 0, 0, 1)',
+    opacity: isDragging ? 0.8 : 1,
+    willChange: 'transform',
   };
 
   return (
