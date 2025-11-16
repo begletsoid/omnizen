@@ -51,6 +51,7 @@ function toPayload(habit: HabitRecord, order: number, nextStatus?: HabitStatus) 
     id: habit.id,
     widget_id: habit.widget_id,
     user_id: habit.user_id,
+    title: habit.title,
     order,
     ...(nextStatus ? { status: nextStatus } : {}),
   } satisfies HabitOrderUpdatePayload;
