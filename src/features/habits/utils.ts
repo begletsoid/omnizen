@@ -22,23 +22,20 @@ export function buildHabitOrderUpdates({
   });
 
   updates.push(
-    ...sanitizedTarget.map((habit, idx) => ({
-      id: habit.id,
-      order: idx + 1,
-      ...(habit.id === activeHabit.id && activeHabit.status !== targetStatus
-        ? { status: targetStatus }
-        : {}),
-    })),
+    ...sanitizedTarget.map((habit, idx) =>
+      toPayload(
+        habit,
+        idx + 1,
+        habit.id === activeHabit.id && activeHabit.status !== targetStatus ? targetStatus : undefined,
+      ),
+    ),
   );
 
   if (activeHabit.status !== targetStatus) {
     updates.push(
       ...getColumn(grouped, activeHabit.status)
         .filter((habit) => habit.id !== activeHabit.id)
-        .map((habit, idx) => ({
-          id: habit.id,
-          order: idx + 1,
-        })),
+        .map((habit, idx) => toPayload(habit, idx + 1)),
     );
   }
 
@@ -47,4 +44,14 @@ export function buildHabitOrderUpdates({
 
 function getColumn(grouped: Record<HabitStatus, HabitRecord[]>, status: HabitStatus) {
   return grouped[status] ?? [];
+}
+
+function toPayload(habit: HabitRecord, order: number, nextStatus?: HabitStatus) {
+  return {
+    id: habit.id,
+    widget_id: habit.widget_id,
+    user_id: habit.user_id,
+    order,
+    ...(nextStatus ? { status: nextStatus } : {}),
+  } satisfies HabitOrderUpdatePayload;
 }
