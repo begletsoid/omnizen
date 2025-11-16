@@ -39,9 +39,9 @@ describe('buildHabitOrderUpdates', () => {
       grouped,
     });
 
-    expect(findUpdate(updates, 'a')).toMatchObject({ order: 3, user_id: 'user', widget_id: 'widget' });
-    expect(findUpdate(updates, 'b')).toMatchObject({ order: 1, user_id: 'user' });
-    expect(findUpdate(updates, 'c')).toMatchObject({ order: 2, user_id: 'user' });
+    expect(findUpdate(updates, 'a')).toMatchObject({ order: 3 });
+    expect(findUpdate(updates, 'b')).toMatchObject({ order: 1 });
+    expect(findUpdate(updates, 'c')).toMatchObject({ order: 2 });
     expect(updates.every((u) => u.status === undefined)).toBe(true);
   });
 
@@ -57,7 +57,6 @@ describe('buildHabitOrderUpdates', () => {
     expect(findUpdate(updates, 'b')).toMatchObject({
       order: 2,
       status: 'adopted',
-      user_id: 'user',
     });
     expect(findUpdate(updates, 'a')?.order).toBe(1);
     expect(findUpdate(updates, 'c')?.order).toBe(2);

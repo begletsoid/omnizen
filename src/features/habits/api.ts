@@ -60,10 +60,19 @@ export async function fetchNextHabitOrder(widgetId: string, status: HabitStatus)
   return fetchNextHabitOrderFromQuery(widgetId, status);
 }
 
-export async function saveHabitOrders(updates: HabitOrderUpdatePayload[]) {
+export async function saveHabitOrders(params: {
+  widgetId: string;
+  userId: string;
+  updates: HabitOrderUpdatePayload[];
+}) {
   const client = requireSupabase();
+  const { widgetId, userId, updates } = params;
   if (!updates.length) return;
-  const { error } = await client.from('habits').upsert(updates, { onConflict: 'id' });
+  const { error } = await client.rpc('reorder_habits', {
+    p_widget_id: widgetId,
+    p_user_id: userId,
+    p_updates: updates,
+  });
   if (error) throw error;
 }
 
