@@ -1,3 +1,5 @@
+import type { CSSProperties } from 'react';
+
 type SortableTimerPillProps = {
   settings: TimerSettings;
   metrics: { elapsed: number; percent: number; colorPreset: CategoryColorPreset };
@@ -46,6 +48,7 @@ type CategoryColorPreset = {
   iconClass: string;
   chipClass: string;
   cardClass: string;
+  percentClass: string;
 };
 
 const describeTimerTags = (timer: TimerSettings, tagMap: Map<string, string>) => {
@@ -62,6 +65,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-white/60',
     chipClass: 'bg-white/10 border-white/20 text-white',
     cardClass: 'border border-white/10 bg-white/5',
+    percentClass: 'text-white/70',
   },
   {
     id: 'rose',
@@ -69,6 +73,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-rose-300',
     chipClass: 'bg-rose-500/15 border-rose-400/40 text-rose-100',
     cardClass: 'border border-rose-400/30 bg-rose-500/5',
+    percentClass: 'text-rose-200',
   },
   {
     id: 'amber',
@@ -76,6 +81,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-amber-300',
     chipClass: 'bg-amber-500/15 border-amber-400/40 text-amber-100',
     cardClass: 'border border-amber-400/30 bg-amber-500/5',
+    percentClass: 'text-amber-200',
   },
   {
     id: 'emerald',
@@ -83,6 +89,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-emerald-300',
     chipClass: 'bg-emerald-500/15 border-emerald-400/40 text-emerald-100',
     cardClass: 'border border-emerald-400/30 bg-emerald-500/5',
+    percentClass: 'text-emerald-200',
   },
   {
     id: 'sky',
@@ -90,6 +97,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-sky-300',
     chipClass: 'bg-sky-500/15 border-sky-400/40 text-sky-100',
     cardClass: 'border border-sky-400/30 bg-sky-500/5',
+    percentClass: 'text-sky-200',
   },
   {
     id: 'violet',
@@ -97,6 +105,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-violet-300',
     chipClass: 'bg-violet-500/15 border-violet-400/40 text-violet-100',
     cardClass: 'border border-violet-400/30 bg-violet-500/5',
+    percentClass: 'text-violet-200',
   },
   {
     id: 'pink',
@@ -104,6 +113,7 @@ const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
     iconClass: 'text-pink-300',
     chipClass: 'bg-pink-500/15 border-pink-400/40 text-pink-100',
     cardClass: 'border border-pink-400/30 bg-pink-500/5',
+    percentClass: 'text-pink-200',
   },
 ];
 
@@ -1628,6 +1638,7 @@ type TimerPillProps = {
   elapsed: number;
   percent: number;
   colorClass: string;
+  percentClass?: string;
   onClick: () => void;
   buttonRef: (node: HTMLButtonElement | null) => void;
   label: string;
@@ -1639,6 +1650,7 @@ const TimerPill = ({
   elapsed,
   percent,
   colorClass,
+  percentClass,
   onClick,
   buttonRef,
   label,
@@ -1668,7 +1680,9 @@ const TimerPill = ({
       >
         {formatDuration(elapsed)}
       </span>
-      <span className="text-xs font-medium text-white/60 whitespace-nowrap">{percent}%</span>
+      <span className={clsx('text-xs font-medium whitespace-nowrap', percentClass ?? 'text-white/60')}>
+        {percent}%
+      </span>
     </div>
   </button>
 );
