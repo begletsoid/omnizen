@@ -12,7 +12,13 @@ import {
   saveHabitOrders,
   updateHabit,
 } from './api';
-import type { HabitInsert, HabitOrderUpdatePayload, HabitRecord, HabitStatus } from './types';
+import type {
+  HabitInsert,
+  HabitOrderUpdatePayload,
+  HabitRecord,
+  HabitStatus,
+  HabitUpdate,
+} from './types';
 
 export function useHabits(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
@@ -70,6 +76,9 @@ export function useCreateHabit(widgetId: string | null) {
         order: nextOrder,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        success_count: 0,
+        fail_count: 0,
+        success_updated_at: new Date().toISOString(),
       };
       queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
         old ? [...old, optimisticHabit] : [optimisticHabit],
@@ -93,15 +102,20 @@ export function useCreateHabit(widgetId: string | null) {
 export function useUpdateHabit(widgetId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      ...payload
-    }: {
-      id: string;
-      title?: string;
-      status?: HabitStatus;
-      order?: number;
-    }) => updateHabit(id, payload),
+    mutationFn: ({ id, ...payload }: { id: string } & HabitUpdate) => updateHabit(id, payload),
+    onMutate: async (variables) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['habits', widgetId] });
+      const previous = queryClient.getQueryData<HabitRecord[]>(['habits', widgetId]);
+      queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>
+        old?.map((habit) => (habit.id === variables.id ? { ...habit, ...variables } : habit)) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['habits', widgetId], context.previous);
+    },
     onSuccess: (_, variables) => {
       if (!widgetId) return;
       queryClient.setQueryData<HabitRecord[]>(['habits', widgetId], (old) =>

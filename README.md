@@ -30,10 +30,35 @@ SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 ```bash
 npm run dev      # локальная разработка
 npm run lint     # ESLint + Prettier
+npm run typecheck # строгая проверка типов
 npm run test     # Vitest (unit)
 npm run build    # prod-сборка (Netlify)
+npm run check    # lint + test + build (используется локально и в CI)
 npm run smoke    # интеграционная проверка Supabase (нужен service role key)
 ```
+
+### Перед пушем
+
+Перед тем как отправлять код в репозиторий или просить ревью, обязательно выполните:
+
+```bash
+npm run check
+```
+
+Команда последовательно запускает `lint`, `test`, `build` и гарантирует, что Vite/SWC не упадёт на синтаксисе. Тот же шаг крутится в GitHub Actions (workflow `CI`), поэтому коммиты, которые не проходят `npm run check`, не попадут в `main`.
+
+### После `git pull`
+
+1. Примените все новые миграции Supabase:
+
+```bash
+npx supabase db push
+```
+
+2. Перезапустите локальный Supabase (если используете Docker) или сделайте `supabase db reset`, чтобы schema cache подхватил новые RPC.
+3. Запустите `npm run smoke` — скрипт проверит, что критичные RPC (`reorder_habits`, `start_micro_task_timer` и т.д.) доступны. Если RPC не найден, скрипт упадёт с инструкцией.
+
+Иначе вы можете увидеть ошибки вида `PGRST202: Could not find the function ... in the schema cache` и NaN в UI из‑за отсутствующих полей.
 
 ## Supabase CLI
 

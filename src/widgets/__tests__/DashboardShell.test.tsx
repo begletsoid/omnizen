@@ -1,4 +1,5 @@
 import type { User } from '@supabase/supabase-js';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,14 +18,31 @@ vi.mock('../../features/dashboards/hooks', () => ({
     error: null,
   }),
 }));
+vi.mock('../../features/layout/hooks', () => ({
+  useDashboardLayout: () => ({
+    data: { layout: [] },
+    saveLayout: vi.fn(),
+    isSaving: false,
+  }),
+}));
 
 describe('DashboardShell', () => {
+  let queryClient: QueryClient;
+
   beforeEach(() => {
+    queryClient = new QueryClient();
     useAuthStore.setState({ user: null, session: null });
   });
 
+  const renderWithProviders = () =>
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DashboardShell />
+      </QueryClientProvider>,
+    );
+
   it('показывает кнопку входа, если пользователь не авторизован', () => {
-    render(<DashboardShell />);
+    renderWithProviders();
 
     expect(screen.getByRole('button', { name: /войти через google/i })).toBeInTheDocument();
   });
@@ -35,7 +53,7 @@ describe('DashboardShell', () => {
       session: null,
     });
 
-    render(<DashboardShell />);
+    renderWithProviders();
 
     expect(screen.getByRole('button', { name: /выйти/i })).toBeInTheDocument();
     expect(screen.getByText(/demo@example.com/i)).toBeInTheDocument();

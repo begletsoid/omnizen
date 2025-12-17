@@ -9,6 +9,9 @@ export type HabitRecord = {
   order: number;
   created_at: string;
   updated_at: string;
+  success_count: number;
+  fail_count: number;
+  success_updated_at: string;
 };
 
 export type HabitInsert = {
@@ -19,7 +22,12 @@ export type HabitInsert = {
   user_id?: string;
 };
 
-export type HabitUpdate = Partial<Pick<HabitRecord, 'title' | 'status' | 'order'>>;
+export type HabitUpdate = Partial<
+  Pick<
+    HabitRecord,
+    'title' | 'status' | 'order' | 'success_count' | 'fail_count' | 'success_updated_at'
+  >
+>;
 
 export type HabitOrderUpdatePayload = Pick<HabitRecord, 'id' | 'order'> & {
   status?: HabitStatus;

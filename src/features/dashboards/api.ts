@@ -49,6 +49,19 @@ export async function saveLayout(dashboardId: string, layout: WidgetLayoutItem[]
     .single();
 }
 
+export async function updateWidgetConfig(widgetId: string, config: Record<string, unknown>) {
+  if (!supabase) throw new Error('Supabase client unavailable');
+  const { data, error } = await supabase
+    .from('widgets')
+    .update({ config })
+    .eq('id', widgetId)
+    .select('*')
+    .single();
+
+  if (error) throw error;
+  return data as WidgetRecord;
+}
+
 export async function bootstrapDashboard(userId: string): Promise<BootstrapResult> {
   if (!supabase) throw new Error('Supabase client unavailable');
 
