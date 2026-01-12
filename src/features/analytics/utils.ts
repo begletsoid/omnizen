@@ -27,6 +27,7 @@ export function clampRange(range: DateRange) {
 
 // Timezone helpers (Europe/Moscow)
 const MOSCOW_TZ = 'Europe/Moscow';
+const MS_IN_DAY = 86_400_000;
 
 function formatMoscow(date: Date, opts: Intl.DateTimeFormatOptions) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: MOSCOW_TZ, ...opts }).format(date);
@@ -69,6 +70,44 @@ export function addDays(dateStr: string, days: number) {
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+export function getDateKeys(range: DateRange, granularity: 'day' | 'week' | 'month') {
+  const keys: string[] = [];
+  const start = new Date(`${range.start}T00:00:00Z`).getTime();
+  const end = new Date(`${range.end}T00:00:00Z`).getTime();
+  if (granularity === 'day') {
+    for (let t = start; t <= end; t += MS_IN_DAY) {
+      const d = new Date(t);
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      keys.push(`${y}-${m}-${day}`);
+    }
+    return keys;
+  }
+  if (granularity === 'week') {
+    // ISO weeks covering the whole range
+    const seen = new Set<string>();
+    for (let t = start; t <= end; t += MS_IN_DAY) {
+      const key = getIsoWeekKey(new Date(t).toISOString());
+      if (!seen.has(key)) {
+        seen.add(key);
+        keys.push(key);
+      }
+    }
+    return keys;
+  }
+  // month
+  const seen = new Set<string>();
+  for (let t = start; t <= end; t += MS_IN_DAY) {
+    const key = getMonthKey(new Date(t).toISOString());
+    if (!seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
 }
 
 export function getIsoWeekKey(iso: string) {

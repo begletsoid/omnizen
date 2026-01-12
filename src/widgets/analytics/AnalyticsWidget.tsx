@@ -16,6 +16,7 @@ import {
   clampRange,
   decodeDaysMask,
   encodeDaysMask,
+  getDateKeys,
   getIsoWeekKey,
   getMonthKey,
   getMoscowWeekdayIndex,
@@ -59,6 +60,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   const [activeTab, setActiveTab] = useState<'tasks' | 'charts'>('tasks');
   const [granularity, setGranularity] = useState<Granularity>('day');
   const [metric, setMetric] = useState<Metric>('sum');
+  const [hideEmptyBuckets, setHideEmptyBuckets] = useState(false);
 
   // Initialize default period if missing
   useEffect(() => {
@@ -108,10 +110,9 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
     return [];
   }, [pages?.pages]);
 
-  const totalPeriodSeconds = useMemo(
-    () => tasks.reduce((sum, t) => sum + (t.elapsed_seconds ?? 0), 0),
-    [tasks],
-  );
+  const totalPeriodSeconds = useMemo(() => {
+    return tasks.reduce((sum, t) => sum + (t.elapsed_seconds ?? 0), 0);
+  }, [tasks]);
 
   const filteredTimers: AnalyticsTimer[] = timers ?? [];
   const nonAutoCategories = useMemo(
@@ -243,17 +244,27 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   };
 
   const chartSeries = useMemo(() => {
-    return filteredByTimer.map(({ timer, tasks }) => ({
-      timer,
-      points: buildSeries(tasks),
-    }));
-  }, [buildSeries, filteredByTimer]);
+    const periodKeys = period ? getDateKeys(period, granularity) : [];
+    return filteredByTimer.map(({ timer, tasks }) => {
+      const seriesPoints = buildSeries(tasks);
+      const map = new Map(seriesPoints.map((p) => [p.key, p]));
+      const points = periodKeys
+        .map((key) => map.get(key) ?? ({ key, label: key, value: 0 } as SeriesPoint))
+        .filter((p) => (hideEmptyBuckets ? p.value > 0 : true));
+      return { timer, points };
+    });
+  }, [buildSeries, filteredByTimer, granularity, hideEmptyBuckets, period]);
 
   const xKeys = useMemo(() => {
-    const all = new Set<string>();
-    chartSeries.forEach(({ points }) => points.forEach((p) => all.add(p.key)));
-    return Array.from(all).sort((a, b) => a.localeCompare(b));
-  }, [chartSeries]);
+    if (!period) return [];
+    const keys = getDateKeys(period, granularity);
+    if (hideEmptyBuckets) {
+      const nonEmpty = new Set<string>();
+      chartSeries.forEach(({ points }) => points.forEach((p) => nonEmpty.add(p.key)));
+      return keys.filter((k) => nonEmpty.has(k));
+    }
+    return keys;
+  }, [chartSeries, granularity, hideEmptyBuckets, period]);
 
   const maxValue = useMemo(() => {
     let m = 0;
@@ -524,6 +535,14 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                     </button>
                   ))}
                 </div>
+                <label className="flex items-center gap-1 rounded-full border border-white/15 bg-background/80 px-2 py-1">
+                  <input
+                    type="checkbox"
+                    checked={hideEmptyBuckets}
+                    onChange={(e) => setHideEmptyBuckets(e.target.checked)}
+                  />
+                  Скрывать пустые бакеты
+                </label>
               </div>
               <div className="relative overflow-x-auto rounded-xl border border-white/10 bg-background/70 p-3">
                 {chartSeries.every((s) => s.points.length === 0) ? (
