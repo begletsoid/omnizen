@@ -23,14 +23,19 @@ import {
   toUtcEndOfMoscowDay,
   toUtcStartOfMoscowDay,
 } from '../../features/analytics/utils';
-import { useTaskCategories, useTaskTags } from '../../features/microTasks/hooks';
+import {
+  useAttachCategoryToTask,
+  useDetachCategoryFromTask,
+  useTaskCategories,
+  useTaskTags,
+} from '../../features/microTasks/hooks';
 import { useAuthStore } from '../../stores/authStore';
 
 type AnalyticsWidgetProps = {
   widgetId: string | null;
 };
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 100;
 
 type Granularity = 'day' | 'week' | 'month';
 type Metric = 'sum' | 'avg' | 'percent';
@@ -48,6 +53,8 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   const deleteTimer = useDeleteAnalyticsTimer();
   const { data: tags = [] } = useTaskTags();
   const { data: categories = [] } = useTaskCategories();
+  const attachCategoryToTask = useAttachCategoryToTask();
+  const detachCategoryFromTask = useDetachCategoryFromTask();
 
   const [activeTab, setActiveTab] = useState<'tasks' | 'charts'>('tasks');
   const [granularity, setGranularity] = useState<Granularity>('day');
@@ -123,6 +130,15 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
       .map(([day, list]) => ({ day, list: list.sort((a, b) => b.created_at.localeCompare(a.created_at)) }))
       .sort((a, b) => b.day.localeCompare(a.day));
   }, [tasks]);
+
+  const timerByTaskId = useMemo(() => {
+    const map = new Map<string, AnalyticsTimer>();
+    tasks.forEach((task) => {
+      const match = filteredTimers.find((timer) => timerMatchesTask(timer, task));
+      if (match) map.set(task.id, match);
+    });
+    return map;
+  }, [filteredTimers, tasks]);
 
   const handlePeriodChange = (field: 'start' | 'end') => (event: ChangeEvent<HTMLInputElement>) => {
     if (!settings) return;
@@ -233,6 +249,12 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
       points: buildSeries(tasks),
     }));
   }, [buildSeries, filteredByTimer]);
+
+  const xKeys = useMemo(() => {
+    const all = new Set<string>();
+    chartSeries.forEach(({ points }) => points.forEach((p) => all.add(p.key)));
+    return Array.from(all).sort((a, b) => a.localeCompare(b));
+  }, [chartSeries]);
 
   const maxValue = useMemo(() => {
     let m = 0;
@@ -428,7 +450,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
           </div>
         </aside>
 
-        <div className="flex min-h-[420px] flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+        <div className="flex min-h-[620px] flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
           {activeTab === 'tasks' ? (
             <div className="flex flex-col gap-3">
               {groupedTasks.length === 0 && (
@@ -442,22 +464,21 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                       <div
                         key={task.id}
                         className="flex items-start justify-between gap-2 rounded-lg border border-white/10 bg-white/5 p-2 text-sm"
+                        style={{
+                          borderLeft: `4px solid ${timerByTaskId.get(task.id)?.color ?? '#7dd3fc'}`,
+                        }}
                       >
-                        <div>
+                        <div className="flex-1">
                           <p className="font-medium text-white">{task.title}</p>
                           <p className="text-xs text-muted">
                             {formatSeconds(task.elapsed_seconds)} · создано {toMoscowDateString(task.created_at)}
                           </p>
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {task.categories?.map((cat) => (
-                              <span
-                                key={cat.id}
-                                className="rounded-full border border-white/15 px-2 py-0.5 text-[11px] text-white/80"
-                              >
-                                {cat.name}
-                              </span>
-                            ))}
-                          </div>
+                          <CategoryEditor
+                            task={task}
+                            nonAutoCategories={nonAutoCategories}
+                            attachCategoryToTask={attachCategoryToTask}
+                            detachCategoryFromTask={detachCategoryFromTask}
+                          />
                         </div>
                       </div>
                     ))}
@@ -513,47 +534,46 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                     role="img"
                     aria-label="График таймеров"
                     className="min-w-full"
-                    viewBox={`0 0 ${Math.max(
-                      100,
-                      Math.max(...chartSeries.map((s) => s.points.length)) * 80,
-                    )} 220`}
+                    viewBox={`0 0 ${Math.max(400, xKeys.length * 160)} 280`}
                     preserveAspectRatio="xMinYMin slice"
                   >
-                    <g transform="translate(0,200)">
-                      {/* X labels */}
-                      {chartSeries[0]?.points.map((p, idx) => (
+                    <g transform="translate(0,240)">
+                      {xKeys.map((key, idx) => (
                         <text
-                          key={p.key}
-                          x={20 + idx * 80}
-                          y={15}
+                          key={key}
+                          x={40 + idx * 140}
+                          y={20}
                           fill="#9CA3AF"
-                          fontSize="10"
+                          fontSize="11"
                           textAnchor="start"
-                          transform={`rotate(0 ${20 + idx * 80} ${15})`}
+                          transform={`rotate(0 ${40 + idx * 140} ${20})`}
                         >
-                          {p.label}
+                          {key}
                         </text>
                       ))}
                     </g>
-                    {/* Series */}
                     {chartSeries.map(({ timer, points }) => {
                       if (!points.length) return null;
                       const color = timer.color ?? '#7dd3fc';
-                      const path = points
-                        .map((p, idx) => {
-                          const x = 20 + idx * 80;
-                          const y = 180 - (p.value / maxValue) * 160;
-                          return `${idx === 0 ? 'M' : 'L'} ${x} ${y}`;
-                        })
-                        .join(' ');
+                      const pointMap = new Map(points.map((p) => [p.key, p]));
+                      let path = '';
+                      xKeys.forEach((key, idx) => {
+                        const p = pointMap.get(key);
+                        if (!p) return;
+                        const x = 40 + idx * 140;
+                        const y = 200 - (p.value / maxValue) * 160;
+                        path += `${path ? ' L' : 'M'} ${x} ${y}`;
+                      });
                       return (
                         <g key={timer.id}>
                           <path d={path} stroke={color} strokeWidth={2} fill="none" />
-                          {points.map((p, idx) => {
-                            const x = 20 + idx * 80;
-                            const y = 180 - (p.value / maxValue) * 160;
+                          {xKeys.map((key, idx) => {
+                            const p = pointMap.get(key);
+                            if (!p) return null;
+                            const x = 40 + idx * 140;
+                            const y = 200 - (p.value / maxValue) * 160;
                             return (
-                              <g key={p.key}>
+                              <g key={key}>
                                 <circle cx={x} cy={y} r={3} fill={color} />
                                 <text x={x + 6} y={y - 6} fill="#e5e7eb" fontSize="10">
                                   {formatValue(p.value, metric)}
@@ -604,4 +624,70 @@ function formatValue(value: number, metric: Metric) {
   const hours = value / 3600;
   if (metric === 'avg') return `${hours.toFixed(2)}ч/день`;
   return `${hours.toFixed(2)}ч`;
+}
+
+type CategoryEditorProps = {
+  task: CompletedTaskWithCategories;
+  nonAutoCategories: { id: string; name: string }[];
+  attachCategoryToTask: ReturnType<typeof useAttachCategoryToTask>;
+  detachCategoryFromTask: ReturnType<typeof useDetachCategoryFromTask>;
+};
+
+function CategoryEditor({
+  task,
+  nonAutoCategories,
+  attachCategoryToTask,
+  detachCategoryFromTask,
+}: CategoryEditorProps) {
+  const [open, setOpen] = useState(false);
+  const selected = new Set(task.categories?.map((c) => c.id) ?? []);
+
+  const toggle = async (categoryId: string) => {
+    if (selected.has(categoryId)) {
+      await detachCategoryFromTask.mutateAsync({ taskId: task.id, categoryId });
+    } else {
+      await attachCategoryToTask.mutateAsync({ taskId: task.id, categoryId });
+    }
+  };
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex flex-wrap items-center gap-1">
+        {task.categories?.map((cat) => (
+          <span
+            key={cat.id}
+            className="rounded-full border border-white/15 px-2 py-0.5 text-[11px] text-white/80"
+          >
+            {cat.name}
+          </span>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="text-[11px] text-white/70 underline-offset-2 hover:text-white"
+      >
+        {open ? 'Скрыть категории' : 'Изменить категории'}
+      </button>
+      {open && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {nonAutoCategories.map((cat) => (
+            <label
+              key={cat.id}
+              className={clsx(
+                'flex items-center gap-1 rounded-md border px-2 py-1 text-[11px]',
+                selected.has(cat.id) ? 'border-white/40' : 'border-white/15 text-white/70',
+              )}
+            >
+              <input type="checkbox" checked={selected.has(cat.id)} onChange={() => toggle(cat.id)} />
+              {cat.name}
+            </label>
+          ))}
+          {nonAutoCategories.length === 0 && (
+            <span className="text-[11px] text-muted">Нет категорий</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }

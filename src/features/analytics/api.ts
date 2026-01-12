@@ -98,6 +98,7 @@ export async function listCompletedTasksWithCategories(params: CompletedTasksPar
     .select(
       `
       id,
+      widget_id,
       user_id,
       title,
       is_done,
