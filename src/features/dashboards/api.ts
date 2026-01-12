@@ -15,6 +15,7 @@ const DEFAULT_WIDGETS: Array<{ type: WidgetRecord['type']; config?: Record<strin
   { type: 'habits', config: { title: 'Лента привычек' } },
   { type: 'problems', config: { title: 'Проблемы / Решения' } },
   { type: 'tasks', config: { title: 'Микрозадачи' } },
+  { type: 'analytics', config: { title: 'Аналитика' } },
   { type: 'image', config: { title: 'Визуальный виджет' } },
 ];
 
@@ -119,8 +120,24 @@ async function ensureWidgets(dashboard: DashboardRecord): Promise<WidgetRecord[]
     .order('created_at');
 
   if (error) throw error;
-  if (existing && existing.length) {
-    return existing as WidgetRecord[];
+  let widgets: WidgetRecord[] = (existing as WidgetRecord[]) ?? [];
+
+  if (widgets.length) {
+    const hasAnalytics = widgets.some((w) => w.type === 'analytics');
+    if (!hasAnalytics) {
+      const { data: createdAnalytics, error: insertAnalyticsError } = await supabase
+        .from('widgets')
+        .insert({
+          dashboard_id: dashboard.id,
+          type: 'analytics',
+          config: { title: 'Аналитика' },
+        })
+        .select('*')
+        .single();
+      if (insertAnalyticsError) throw insertAnalyticsError;
+      widgets = [...widgets, createdAnalytics as WidgetRecord];
+    }
+    return widgets;
   }
 
   const inserts = DEFAULT_WIDGETS.map((widget) => ({
@@ -152,7 +169,31 @@ async function ensureLayout(dashboardId: string, widgets: WidgetRecord[]): Promi
   }
 
   if (layoutResponse.data) {
-    return layoutResponse.data as WidgetLayoutRecord;
+    const layout = layoutResponse.data as WidgetLayoutRecord;
+    const layoutIds = new Set(layout.layout.map((item) => item.widget_id));
+    const missing = widgets.filter((w) => !layoutIds.has(w.id));
+    if (!missing.length) {
+      return layout;
+    }
+    const startIndex = layout.layout.length;
+    const additions = missing.map((widget, idx) => ({
+      widget_id: widget.id,
+      type: widget.type,
+      x: ((startIndex + idx) % 2) * 6,
+      y: Math.floor((startIndex + idx) / 2) * 4,
+      w: DEFAULT_GRID[startIndex + idx]?.w ?? 4,
+      h: DEFAULT_GRID[startIndex + idx]?.h ?? 3,
+      z: startIndex + idx,
+    }));
+    const nextLayout = [...layout.layout, ...additions];
+    const { data: updatedLayout, error: updateError } = await supabase
+      .from('widget_layouts')
+      .update({ layout: nextLayout, updated_at: new Date().toISOString() })
+      .eq('id', layout.id)
+      .select('*')
+      .single();
+    if (updateError) throw updateError;
+    return updatedLayout as WidgetLayoutRecord;
   }
 
   const layout = widgets.map((widget, index) => ({
