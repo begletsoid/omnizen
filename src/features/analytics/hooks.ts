@@ -211,6 +211,6 @@ export function useCompletedTasks(params: Omit<CompletedTasksParams, 'userId'> &
       });
     },
     enabled,
-    keepPreviousData: true,
+    staleTime: 5_000,
   });
 }

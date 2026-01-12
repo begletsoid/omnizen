@@ -15,6 +15,7 @@ const DEFAULT_WIDGETS: Array<{ type: WidgetRecord['type']; config?: Record<strin
   { type: 'habits', config: { title: 'Лента привычек' } },
   { type: 'problems', config: { title: 'Проблемы / Решения' } },
   { type: 'tasks', config: { title: 'Микрозадачи' } },
+  { type: 'analytics', config: { title: 'Аналитика' } },
   { type: 'image', config: { title: 'Визуальный виджет' } },
 ];
 

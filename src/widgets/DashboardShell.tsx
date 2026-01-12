@@ -18,6 +18,7 @@ import {
   GRID_GAP_PX,
 } from '../features/layout/utils';
 import { useAuthStore } from '../stores/authStore';
+import { AnalyticsWidget } from './analytics/AnalyticsWidget';
 import { HabitsWidget } from './habits/HabitsWidget';
 import { MicroTasksWidget } from './microTasks/MicroTasksWidget';
 
@@ -43,6 +44,11 @@ const widgetMeta: Record<
   tasks: {
     title: 'Микрозадачи',
     description: 'Быстрый todo-лист с чекбоксами и сортировкой мышью.',
+    accent: 'cyan',
+  },
+  analytics: {
+    title: 'Аналитика',
+    description: 'Отчёты по завершённым задачам, таймеры и графики.',
     accent: 'cyan',
   },
   image: {
@@ -277,6 +283,8 @@ export function DashboardShell() {
                       }
                     />
                   );
+                } else if (item.type === 'analytics') {
+                  content = <AnalyticsWidget widgetId={item.widget_id} />;
                 } else {
                   content = (
                     <div className="h-full">

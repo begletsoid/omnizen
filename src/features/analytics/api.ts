@@ -1,8 +1,6 @@
 import { supabase } from '../../lib/supabaseClient';
 import type {
-  AnalyticsSettings,
   AnalyticsSettingsUpsert,
-  AnalyticsTimer,
   AnalyticsTimerInsert,
   AnalyticsTimerUpdate,
   CompletedTaskWithCategories,
