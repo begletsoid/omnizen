@@ -180,8 +180,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
     updateTimerField(timer, { [field]: Array.from(current) } as Partial<AnalyticsTimer>);
   };
 
-  const timerMatchesTask = (timer: AnalyticsTimer, task: CompletedTaskWithCategories) => {
-    // Day filter
+  function timerMatchesTask(timer: AnalyticsTimer, task: CompletedTaskWithCategories) {
     const mask = decodeDaysMask(timer.days_mask);
     const weekday = getMoscowWeekdayIndex(task.created_at);
     if (!mask[weekday]) return false;
@@ -198,7 +197,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
     const hasFilters = (timer.tag_ids?.length ?? 0) > 0 || (timer.category_ids?.length ?? 0) > 0;
     if (!hasFilters) return true;
     return tagMatch || categoryMatch;
-  };
+  }
 
   const filteredByTimer = useMemo(() => {
     return filteredTimers.map((timer) => ({
