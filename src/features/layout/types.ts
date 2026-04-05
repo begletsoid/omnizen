@@ -1,6 +1,6 @@
 export type LayoutItem = {
   widget_id: string;
-  type: 'habits' | 'problems' | 'tasks' | 'image' | 'analytics';
+  type: 'habits' | 'problems' | 'tasks' | 'image' | 'analytics' | 'goals';
   x: number;
   y: number;
   w: number;

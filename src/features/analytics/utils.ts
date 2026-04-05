@@ -90,7 +90,7 @@ export function getDateKeys(range: DateRange, granularity: 'day' | 'week' | 'mon
     // ISO weeks covering the whole range
     const seen = new Set<string>();
     for (let t = start; t <= end; t += MS_IN_DAY) {
-      const key = getIsoWeekKey(new Date(t).toISOString());
+      const key = getWeekStartDate(new Date(t).toISOString());
       if (!seen.has(key)) {
         seen.add(key);
         keys.push(key);
@@ -134,4 +134,28 @@ export function getIsoWeekKey(iso: string) {
 export function getMonthKey(iso: string) {
   const d = new Date(iso);
   return formatMoscow(d, { year: 'numeric', month: '2-digit' });
+}
+
+export function getWeekStartDate(iso: string) {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const options: Intl.DateTimeFormatOptions = {
+      timeZone: MOSCOW_TZ,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    };
+    // Shift to Monday of that ISO week in Moscow TZ
+    const parts = new Intl.DateTimeFormat('en-CA', options).formatToParts(d);
+    const y = Number(parts.find((p) => p.type === 'year')?.value ?? '1970');
+    const m = Number(parts.find((p) => p.type === 'month')?.value ?? '01');
+    const day = Number(parts.find((p) => p.type === 'day')?.value ?? '01');
+    const local = new Date(Date.UTC(y, m - 1, day));
+    const weekday = (local.getUTCDay() + 6) % 7; // Mon=0
+    local.setUTCDate(local.getUTCDate() - weekday);
+    return formatMoscow(local, { year: 'numeric', month: '2-digit', day: '2-digit' });
+  } catch {
+    return iso;
+  }
 }

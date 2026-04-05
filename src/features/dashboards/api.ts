@@ -15,6 +15,7 @@ const DEFAULT_WIDGETS: Array<{ type: WidgetRecord['type']; config?: Record<strin
   { type: 'habits', config: { title: 'Лента привычек' } },
   { type: 'problems', config: { title: 'Проблемы / Решения' } },
   { type: 'tasks', config: { title: 'Микрозадачи' } },
+  { type: 'goals', config: { title: 'Задачи' } },
   { type: 'analytics', config: { title: 'Аналитика' } },
   { type: 'image', config: { title: 'Визуальный виджет' } },
 ];
@@ -136,6 +137,20 @@ async function ensureWidgets(dashboard: DashboardRecord): Promise<WidgetRecord[]
         .single();
       if (insertAnalyticsError) throw insertAnalyticsError;
       widgets = [...widgets, createdAnalytics as WidgetRecord];
+    }
+    const hasGoals = widgets.some((w) => w.type === 'goals');
+    if (!hasGoals) {
+      const { data: createdGoals, error: insertGoalsError } = await supabase
+        .from('widgets')
+        .insert({
+          dashboard_id: dashboard.id,
+          type: 'goals',
+          config: { title: 'Задачи' },
+        })
+        .select('*')
+        .single();
+      if (insertGoalsError) throw insertGoalsError;
+      widgets = [...widgets, createdGoals as WidgetRecord];
     }
     return widgets;
   }

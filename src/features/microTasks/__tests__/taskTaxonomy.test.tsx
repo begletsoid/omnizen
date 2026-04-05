@@ -1,4 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactElement, ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { MicroTaskRecord, TaskCategory, TaskTag } from '../types';
@@ -23,7 +25,12 @@ const createMicroTaskMutation = buildMutation();
 const updateMicroTaskMutation = buildMutation();
 const deleteMicroTaskMutation = buildMutation();
 const toggleTimerMutation = buildMutation();
-const reorderMicroTasksMutation = vi.fn();
+const reorderMicroTaskItemsMutation = vi.fn();
+const createGroupMutation = buildMutation();
+const updateGroupMutation = buildMutation();
+const deleteGroupMutation = buildMutation();
+const createGroupTemplateMutation = buildMutation();
+const deleteGroupTemplateMutation = buildMutation();
 const archiveMicroTaskMutation = { ...buildMutation(), isPending: false, variables: undefined as string | undefined };
 const updateCategoryColorMutation = buildMutation();
 
@@ -40,10 +47,17 @@ const mockTasksState = {
 
 vi.mock('../../../features/microTasks/hooks', () => ({
   useMicroTasks: () => mockTasksState,
+  useMicroTaskGroups: () => ({ data: [] }),
+  useMicroTaskGroupTemplates: () => ({ data: [] }),
   useCreateMicroTask: () => createMicroTaskMutation,
+  useCreateMicroTaskGroup: () => createGroupMutation,
+  useUpdateMicroTaskGroup: () => updateGroupMutation,
+  useDeleteMicroTaskGroup: () => deleteGroupMutation,
+  useCreateMicroTaskGroupTemplate: () => createGroupTemplateMutation,
+  useDeleteMicroTaskGroupTemplate: () => deleteGroupTemplateMutation,
   useUpdateMicroTask: () => updateMicroTaskMutation,
   useDeleteMicroTask: () => deleteMicroTaskMutation,
-  useReorderMicroTasks: () => ({ mutate: reorderMicroTasksMutation }),
+  useReorderMicroTaskItems: () => ({ mutate: reorderMicroTaskItemsMutation }),
   useToggleMicroTaskTimer: () => ({ mutateAsync: toggleTimerMutation.mutateAsync }),
   useArchiveMicroTask: () => archiveMicroTaskMutation,
   useTaskTags: () => ({ data: mockTags }),
@@ -95,11 +109,11 @@ describe('Micro task taxonomy', () => {
     resetMutation(updateCategoryColorMutation);
     archiveMicroTaskMutation.isPending = false;
     archiveMicroTaskMutation.variables = undefined;
-    reorderMicroTasksMutation.mockReset();
+    reorderMicroTaskItemsMutation.mockReset();
   });
 
   it('creates a tag inline and auto category request is sent', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const input = screen.getByPlaceholderText('Новый тег');
@@ -112,7 +126,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('deletes a tag through the manager badge', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const button = screen.getByLabelText('Удалить тег AutoFocus');
@@ -124,7 +138,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('creates and renames a manual category inline', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const categoryInput = screen.getByPlaceholderText('Новая категория');
@@ -150,7 +164,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('deletes a manual category via toolbar button', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const manualCard = screen.getByTestId('category-card-cat-manual');
@@ -163,7 +177,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('shows auto categories, запрещает переименование, но позволяет выбрать цвет', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const autoCard = screen.getByTestId('category-card-cat-auto');
@@ -177,7 +191,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('attaches tags inside the category section with instant action and search', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const manualCard = screen.getByTestId('category-card-cat-manual');
@@ -203,7 +217,7 @@ describe('Micro task taxonomy', () => {
       buildCategory('cat-auto', 'AutoFocus', true, [mockTags[0]]),
       buildCategory('cat-manual', 'Manual Bucket', false, [mockTags[1]]),
     ];
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openManager();
 
     const manualCard = screen.getByTestId('category-card-cat-manual');
@@ -219,7 +233,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('attaches a category to task through the card popover and updates buffer', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openTaskCategoryPopover();
 
     const popover = screen.getByTestId('task-category-popover');
@@ -240,7 +254,7 @@ describe('Micro task taxonomy', () => {
   });
 
   it('detaches a category from a task via popover badge', async () => {
-    render(<MicroTasksWidget widgetId="widget-1" />);
+    renderWithClient(<MicroTasksWidget widgetId="widget-1" />);
     await openTaskCategoryPopover();
 
     const popover = screen.getByTestId('task-category-popover');
@@ -313,6 +327,8 @@ function buildTask(id: string, title: string, categoryIds: string[]): MicroTaskR
     title,
     is_done: false,
     order: 1,
+    group_id: null,
+    group_order: null,
     elapsed_seconds: 0,
     timer_state: 'never',
     last_started_at: null,
@@ -323,4 +339,17 @@ function buildTask(id: string, title: string, categoryIds: string[]): MicroTaskR
       mockCategories.find((category) => category.id === categoryId) ?? buildCategory(categoryId, categoryId, false, []),
     ),
   };
+}
+
+function renderWithClient(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  const Wrapper = ({ children }: { children?: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  return render(ui, { wrapper: Wrapper });
 }

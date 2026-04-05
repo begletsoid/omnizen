@@ -7,17 +7,13 @@ export const DEFAULT_ROW_HEIGHT_PX = 180;
 
 export function clampGridPosition(
   candidate: { x: number; y: number },
-  item: LayoutItem,
+  _item: LayoutItem,
 ): { x: number; y: number } {
-  const width = (item.w ?? 4);
-  const height = (item.h ?? 3);
-  const maxX = Math.max(0, GRID_COLUMNS - width);
-  const maxY = Math.max(0, GRID_COLUMNS * 4 - height); // грубый предел
   const snap = 1 / GRID_SUBDIVISIONS;
   const roundToSubgrid = (value: number) => Math.round(value / snap) * snap;
   return {
-    x: Math.min(Math.max(0, roundToSubgrid(candidate.x)), maxX),
-    y: Math.min(Math.max(0, roundToSubgrid(candidate.y)), maxY),
+    x: Math.max(0, roundToSubgrid(candidate.x)),
+    y: Math.max(0, roundToSubgrid(candidate.y)),
   };
 }
 

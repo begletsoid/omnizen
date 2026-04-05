@@ -7,23 +7,33 @@ import {
   attachCategoriesToTask,
   attachTagToCategory,
   createMicroTask,
+  createMicroTaskGroup,
+  createMicroTaskGroupTemplate,
   createTaskCategory,
   createTaskTag,
   deleteMicroTask,
+  deleteMicroTaskGroup,
+  deleteMicroTaskGroupTemplate,
   deleteTaskCategory,
   deleteTaskTag,
   detachCategoryFromTask,
   detachTagFromCategory,
   fetchNextMicroTaskOrder,
+  getMicroTaskGroups,
   getMicroTasks,
   getTaskCategoryBuffer,
   listTaskCategories,
+  listMicroTaskGroupTemplateItems,
+  listMicroTaskGroupTemplates,
+  replaceMicroTaskGroupTemplateItems,
   listTaskTags,
   pauseMicroTaskTimer,
   reorderMicroTasks,
+  reorderMicroTaskItems,
   setTaskCategoryBuffer,
   startMicroTaskTimer,
   updateMicroTask,
+  updateMicroTaskGroup,
   updateTaskCategoryAttributes,
 } from './api';
 import type {
@@ -31,6 +41,11 @@ import type {
   MicroTaskOrderUpdatePayload,
   MicroTaskRecord,
   MicroTaskUpdate,
+  MicroTaskGroup,
+  MicroTaskGroupOrderUpdatePayload,
+  MicroTaskGroupTemplate,
+  MicroTaskGroupTemplateItem,
+  MicroTaskGroupTaskUpdatePayload,
   TaskCategory,
   TaskTag,
 } from './types';
@@ -44,32 +59,165 @@ export function useMicroTasks(widgetId: string | null) {
       if (!widgetId) throw new Error('Widget id is required');
       const { data, error } = await getMicroTasks(widgetId);
       if (error) throw error;
-      return (data ?? []).map((task: any) => ({
-        ...task,
-        timer_state: normalizeTimerState(task.timer_state),
-        elapsed_seconds: task.elapsed_seconds ?? 0,
-        categories:
-          task.categories?.map((link: any) => ({
-            id: link.task_categories.id,
-            name: link.task_categories.name,
-            is_auto: link.task_categories.is_auto,
-            color: link.task_categories.color,
-            user_id: link.task_categories.user_id,
-            created_at: link.task_categories.created_at,
-            updated_at: link.task_categories.updated_at,
-            source_tag_id: link.task_categories.source_tag_id,
-            tags:
-              link.task_categories.tags?.map((tagLink: any) => ({
-                id: tagLink.task_tags.id,
-                name: tagLink.task_tags.name,
-                user_id: tagLink.task_tags.user_id,
-                created_at: tagLink.task_tags.created_at,
-                updated_at: tagLink.task_tags.updated_at,
-              })) ?? [],
-          })) ?? [],
-      })) as MicroTaskRecord[];
+      type RawTagLink = { task_tags: { id: string; name: string; user_id: string; created_at: string; updated_at: string } };
+      type RawCategoryLink = {
+        task_categories: {
+          id: string;
+          name: string;
+          is_auto: boolean;
+          color: string | null;
+          user_id: string;
+          created_at: string;
+          updated_at: string;
+          source_tag_id: string | null;
+          tags?: RawTagLink[];
+        };
+      };
+      type RawTask = Omit<MicroTaskRecord, 'categories'> & { categories?: RawCategoryLink[] };
+
+      return (data ?? []).map((task) => {
+        const raw = task as RawTask;
+        return {
+          ...raw,
+          timer_state: normalizeTimerState(raw.timer_state),
+          elapsed_seconds: raw.elapsed_seconds ?? 0,
+          group_id: raw.group_id ?? null,
+          group_order: typeof raw.group_order === 'number' ? raw.group_order : null,
+          categories:
+            raw.categories?.map((link) => ({
+              id: link.task_categories.id,
+              name: link.task_categories.name,
+              is_auto: link.task_categories.is_auto,
+              color: link.task_categories.color,
+              user_id: link.task_categories.user_id,
+              created_at: link.task_categories.created_at,
+              updated_at: link.task_categories.updated_at,
+              source_tag_id: link.task_categories.source_tag_id,
+              tags:
+                link.task_categories.tags?.map((tagLink: RawTagLink) => ({
+                  id: tagLink.task_tags.id,
+                  name: tagLink.task_tags.name,
+                  user_id: tagLink.task_tags.user_id,
+                  created_at: tagLink.task_tags.created_at,
+                  updated_at: tagLink.task_tags.updated_at,
+                })) ?? [],
+            })) ?? [],
+        };
+      }) as MicroTaskRecord[];
     },
     enabled,
+  });
+}
+
+export function useMicroTaskGroups(widgetId: string | null) {
+  const enabled = Boolean(widgetId && supabase);
+  return useQuery<MicroTaskGroup[], Error>({
+    queryKey: ['microTaskGroups', widgetId],
+    queryFn: async () => {
+      if (!widgetId) throw new Error('Widget id is required');
+      const { data, error } = await getMicroTaskGroups(widgetId);
+      if (error) throw error;
+      return (data ?? []) as MicroTaskGroup[];
+    },
+    enabled,
+  });
+}
+
+export function useCreateMicroTaskGroup(widgetId: string | null) {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ name, order }: { name: string; order: number }) => {
+      if (!widgetId) throw new Error('Widget id missing');
+      if (!user) throw new Error('User not authenticated');
+      const { data, error } = await createMicroTaskGroup({
+        widget_id: widgetId,
+        user_id: user.id,
+        name,
+        order,
+      });
+      if (error) throw error;
+      return data as MicroTaskGroup;
+    },
+    onMutate: async ({ name, order }) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['microTaskGroups', widgetId] });
+      const previous = queryClient.getQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId]);
+      const optimisticId = `temp-${nanoid()}`;
+      const optimisticGroup: MicroTaskGroup = {
+        id: optimisticId,
+        widget_id: widgetId,
+        user_id: user?.id ?? 'temp-user',
+        name,
+        order,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
+        old ? [...old, optimisticGroup] : [optimisticGroup],
+      );
+      return { previous, optimisticId };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['microTaskGroups', widgetId], context.previous);
+    },
+    onSuccess: (data, _vars, context) => {
+      if (!widgetId) return;
+      queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
+        old?.map((group) => (group.id === context?.optimisticId ? data : group)) ?? [data],
+      );
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] });
+    },
+  });
+}
+
+export function useUpdateMicroTaskGroup(widgetId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...payload }: { id: string } & Partial<Pick<MicroTaskGroup, 'name' | 'order'>>) =>
+      updateMicroTaskGroup(id, payload),
+    onMutate: async (variables) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['microTaskGroups', widgetId] });
+      const previous = queryClient.getQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId]);
+      queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
+        old?.map((group) => (group.id === variables.id ? { ...group, ...variables } : group)) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['microTaskGroups', widgetId], context.previous);
+    },
+    onSettled: () => {
+      if (!widgetId) return;
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] });
+    },
+  });
+}
+
+export function useDeleteMicroTaskGroup(widgetId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => deleteMicroTaskGroup(id),
+    onMutate: async (id) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['microTaskGroups', widgetId] });
+      const previous = queryClient.getQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId]);
+      queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
+        old?.filter((group) => group.id !== id) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _id, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['microTaskGroups', widgetId], context.previous);
+    },
+    onSettled: () => {
+      if (!widgetId) return;
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] });
+    },
   });
 }
 
@@ -274,6 +422,68 @@ export function useReorderMicroTasks(widgetId: string | null) {
   });
 }
 
+export function useReorderMicroTaskItems(widgetId: string | null) {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      taskUpdates,
+      groupUpdates,
+    }: {
+      taskUpdates: MicroTaskGroupTaskUpdatePayload[];
+      groupUpdates: MicroTaskGroupOrderUpdatePayload[];
+    }) => {
+      if (!widgetId) throw new Error('Widget id missing');
+      if (!user) throw new Error('User not authenticated');
+      return reorderMicroTaskItems({
+        widgetId,
+        userId: user.id,
+        taskUpdates,
+        groupUpdates,
+      });
+    },
+    onMutate: async ({ taskUpdates, groupUpdates }) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
+      await queryClient.cancelQueries({ queryKey: ['microTaskGroups', widgetId] });
+      const previousTasks = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
+      const previousGroups = queryClient.getQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId]);
+      const taskMap = new Map(taskUpdates.map((update) => [update.id, update]));
+      const groupMap = new Map(groupUpdates.map((update) => [update.id, update.order]));
+      queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+        old?.map((task) => {
+          const update = taskMap.get(task.id);
+          if (!update) return task;
+          return {
+            ...task,
+            order: update.order,
+            group_id: update.group_id,
+            group_order: update.group_order,
+          };
+        }) ?? [],
+      );
+      queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
+        old?.map((group) => (groupMap.has(group.id) ? { ...group, order: groupMap.get(group.id)! } : group)) ?? [],
+      );
+      return { previousTasks, previousGroups };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context) return;
+      if (context.previousTasks) {
+        queryClient.setQueryData(['microTasks', widgetId], context.previousTasks);
+      }
+      if (context.previousGroups) {
+        queryClient.setQueryData(['microTaskGroups', widgetId], context.previousGroups);
+      }
+    },
+    onSettled: () => {
+      if (!widgetId) return;
+      queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] });
+    },
+  });
+}
+
 export function useToggleMicroTaskTimer(widgetId: string | null) {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
@@ -281,9 +491,9 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
     mutationFn: async ({ id, isRunning }: { id: string; isRunning: boolean }) => {
       if (!user) throw new Error('User not authenticated');
       if (isRunning) {
-        return pauseMicroTaskTimer(id, user.id);
+        return pauseMicroTaskTimer(id);
       }
-      return startMicroTaskTimer(id, user.id);
+      return startMicroTaskTimer(id);
     },
     onMutate: async ({ id, isRunning }) => {
       if (!widgetId) return;
@@ -706,6 +916,69 @@ export function useDetachCategoryFromTask() {
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['microTasks'] });
+    },
+  });
+}
+
+export function useMicroTaskGroupTemplates() {
+  const user = useAuthStore((state) => state.user);
+  return useQuery<MicroTaskGroupTemplate[], Error>({
+    queryKey: ['microTaskGroupTemplates', user?.id],
+    queryFn: async () => {
+      if (!user) throw new Error('User not authenticated');
+      return listMicroTaskGroupTemplates(user.id);
+    },
+    enabled: Boolean(user?.id),
+  });
+}
+
+export function useMicroTaskGroupTemplateItems(templateId: string | null) {
+  const enabled = Boolean(templateId);
+  return useQuery<MicroTaskGroupTemplateItem[], Error>({
+    queryKey: ['microTaskGroupTemplateItems', templateId],
+    queryFn: async () => {
+      if (!templateId) throw new Error('Template id required');
+      return listMicroTaskGroupTemplateItems(templateId);
+    },
+    enabled,
+  });
+}
+
+export function useCreateMicroTaskGroupTemplate() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      name,
+      items,
+    }: {
+      name: string;
+      items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>;
+    }) => {
+      if (!user) throw new Error('User not authenticated');
+      const { data, error } = await createMicroTaskGroupTemplate({ user_id: user.id, name });
+      if (error) throw error;
+      const template = data as MicroTaskGroupTemplate;
+      const { error: itemsError } = await replaceMicroTaskGroupTemplateItems(template.id, items);
+      if (itemsError) throw itemsError;
+      return template;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroupTemplates', user?.id] });
+    },
+  });
+}
+
+export function useDeleteMicroTaskGroupTemplate() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (templateId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      return deleteMicroTaskGroupTemplate(templateId, user.id);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['microTaskGroupTemplates', user?.id] });
     },
   });
 }

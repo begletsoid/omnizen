@@ -7,6 +7,8 @@ export type MicroTaskRecord = {
   title: string;
   is_done: boolean;
   order: number;
+  group_id?: string | null;
+  group_order?: number | null;
   elapsed_seconds: number;
   timer_state: MicroTaskTimerState;
   last_started_at: string | null;
@@ -21,11 +23,14 @@ export type MicroTaskInsert = {
   widget_id: string;
   user_id?: string;
   order?: number;
+  group_id?: string | null;
+  group_order?: number | null;
   is_done?: boolean;
   elapsed_seconds?: number;
   timer_state?: MicroTaskTimerState;
   last_started_at?: string | null;
   archived_at?: string | null;
+  goal_id?: string | null;
 };
 
 export type MicroTaskUpdate = Partial<
@@ -34,6 +39,8 @@ export type MicroTaskUpdate = Partial<
     | 'title'
     | 'is_done'
     | 'order'
+    | 'group_id'
+    | 'group_order'
     | 'elapsed_seconds'
     | 'timer_state'
     | 'last_started_at'
@@ -74,3 +81,30 @@ export type TaskCategoryBuffer = {
   updated_at: string;
 };
 
+export type MicroTaskGroup = {
+  id: string;
+  widget_id: string;
+  user_id: string;
+  name: string;
+  order: number;
+  created_at: string;
+  updated_at: string;
+};export type MicroTaskGroupTemplate = {
+  id: string;
+  user_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+};export type MicroTaskGroupTemplateItem = {
+  id: string;
+  template_id: string;
+  title: string;
+  category_ids: string[];
+  order: number;
+  created_at: string;
+};export type MicroTaskGroupOrderUpdatePayload = Pick<MicroTaskGroup, 'id' | 'order'>;export type MicroTaskGroupTaskUpdatePayload = {
+  id: string;
+  order: number;
+  group_id: string | null;
+  group_order: number | null;
+};

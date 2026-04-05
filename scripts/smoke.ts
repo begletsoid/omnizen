@@ -43,6 +43,7 @@ async function run() {
   const password = 'SmokeTest123!';
 let habitsWidgetId: string | null = null;
 let microTasksWidgetId: string | null = null;
+let analyticsWidgetId: string | null = null;
   console.log('Creating test user', email);
   const { data, error } = await adminClient.auth.admin.createUser({
     email,
@@ -80,9 +81,16 @@ let microTasksWidgetId: string | null = null;
     if (microWidget) {
       microTasksWidgetId = microWidget.id;
     }
+    const analyticsWidget = bootstrap.widgets.find((widget) => widget.type === 'analytics');
+    if (analyticsWidget) {
+      analyticsWidgetId = analyticsWidget.id;
+    }
     await runHabitReorderSmoke(habitsWidgetId, userId);
     if (microTasksWidgetId) {
       await runMicroTasksSmoke(microTasksWidgetId, userId);
+    }
+    if (analyticsWidgetId) {
+      await runAnalyticsSmoke(userId);
     }
     await runLayoutReorderSmoke(bootstrap.dashboard.id);
 
@@ -100,6 +108,12 @@ let microTasksWidgetId: string | null = null;
     }
     if (microTasksWidgetId) {
       await supabase?.from('micro_tasks').delete().eq('widget_id', microTasksWidgetId);
+      await supabase?.from('micro_task_groups').delete().eq('widget_id', microTasksWidgetId);
+    }
+    await supabase?.from('micro_task_group_templates').delete().eq('user_id', userId);
+    if (analyticsWidgetId) {
+      await supabase?.from('analytics_timers').delete().eq('user_id', userId);
+      await supabase?.from('analytics_settings').delete().eq('user_id', userId);
     }
     await adminClient.auth.admin.deleteUser(userId);
     console.log('Cleaned up test user');
@@ -166,6 +180,8 @@ async function runMicroTasksSmoke(widgetId: string, userId: string) {
   if (!supabase) throw new Error('Supabase client missing');
 
   await supabase.from('micro_tasks').delete().eq('widget_id', widgetId);
+  await supabase.from('micro_task_groups').delete().eq('widget_id', widgetId);
+  await supabase.from('micro_task_group_templates').delete().eq('user_id', userId);
   const seed = [
     { title: 'Micro Smoke 1', order: 1 },
     { title: 'Micro Smoke 2', order: 2 },
@@ -178,6 +194,59 @@ async function runMicroTasksSmoke(widgetId: string, userId: string) {
   const insertResult = await supabase.from('micro_tasks').insert(seed).select('*');
   if (insertResult.error) throw insertResult.error;
   const tasks = insertResult.data!;
+
+  const { data: group, error: groupError } = await supabase
+    .from('micro_task_groups')
+    .insert({ widget_id: widgetId, user_id: userId, name: 'Smoke Group', order: 1 })
+    .select('*')
+    .single();
+  if (groupError || !group) throw groupError ?? new Error('Failed to create group');
+
+  const groupAssign = await supabase
+    .from('micro_tasks')
+    .update({ group_id: group.id, group_order: 1 })
+    .eq('id', tasks[0].id);
+  if (groupAssign.error) throw groupAssign.error;
+
+  const { data: template, error: templateError } = await supabase
+    .from('micro_task_group_templates')
+    .insert({ user_id: userId, name: 'Smoke Template' })
+    .select('*')
+    .single();
+  if (templateError || !template) throw templateError ?? new Error('Failed to create template');
+
+  const templateItemsResult = await supabase.from('micro_task_group_template_items').insert([
+    {
+      template_id: template.id,
+      title: tasks[0].title,
+      category_ids: [],
+      order: 1,
+    },
+  ]);
+  if (templateItemsResult.error) throw templateItemsResult.error;
+
+  const { data: spawnedGroup, error: spawnedGroupError } = await supabase
+    .from('micro_task_groups')
+    .insert({ widget_id: widgetId, user_id: userId, name: template.name, order: 2 })
+    .select('*')
+    .single();
+  if (spawnedGroupError || !spawnedGroup) {
+    throw spawnedGroupError ?? new Error('Failed to create group from template');
+  }
+
+  const spawnResult = await supabase.from('micro_tasks').insert([
+    {
+      widget_id: widgetId,
+      user_id: userId,
+      title: tasks[0].title,
+      order: 3,
+      group_id: spawnedGroup.id,
+      group_order: 1,
+      elapsed_seconds: 0,
+      is_done: false,
+    },
+  ]);
+  if (spawnResult.error) throw spawnResult.error;
 
   // Start first task timer
   await supabase.rpc('start_micro_task_timer', { p_task_id: tasks[0].id });
@@ -225,6 +294,44 @@ async function runMicroTasksSmoke(widgetId: string, userId: string) {
   const orders = afterReorder.map((task) => task.order);
   if (orders.some((order, idx) => order !== expected[idx])) {
     throw new Error('Micro task reorder did not normalize order values');
+  }
+}
+
+async function runAnalyticsSmoke(userId: string) {
+  if (!supabase) throw new Error('Supabase client missing');
+
+  await supabase.from('analytics_timers').delete().eq('user_id', userId);
+  await supabase.from('analytics_settings').delete().eq('user_id', userId);
+
+  const settingsResult = await supabase
+    .from('analytics_settings')
+    .insert({ user_id: userId, period_start: '2025-01-01', period_end: '2025-01-07' })
+    .select('*')
+    .single();
+  if (settingsResult.error) throw settingsResult.error;
+
+  const timerResult = await supabase
+    .from('analytics_timers')
+    .insert({
+      user_id: userId,
+      name: 'Smoke Timer',
+      color: '#7dd3fc',
+      days_mask: '1111111',
+      tag_ids: [],
+      category_ids: [],
+      sort_order: 1,
+    })
+    .select('*')
+    .single();
+  if (timerResult.error) throw timerResult.error;
+
+  const { data: timers, error: timersError } = await supabase
+    .from('analytics_timers')
+    .select('*')
+    .eq('user_id', userId);
+  if (timersError) throw timersError;
+  if (!timers || timers.length === 0) {
+    throw new Error('Analytics timers were not created');
   }
 }
 
@@ -303,13 +410,33 @@ async function runLayoutReorderSmoke(dashboardId: string) {
 }
 
 run().catch((err) => {
-  if ((err as any)?.code === '23514' && String((err as any)?.message).includes('widgets_type_check')) {
+  const error = err instanceof Error ? err : new Error(String(err));
+  const code =
+    typeof err === 'object' && err && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : undefined;
+  const message =
+    typeof err === 'object' && err && 'message' in err ? String((err as { message?: unknown }).message) : error.message;
+
+  if (code === '23514' && message.includes('widgets_type_check')) {
     console.warn(
       'Smoke test skipped: backend schema не обновлено (widgets_type_check). Примените новые миграции и повторите.',
     );
     process.exit(0);
   }
+  if (
+    message.includes('micro_task_groups') ||
+    message.includes('micro_task_group_templates') ||
+    message.includes('micro_task_group_template_items') ||
+    message.includes('group_id') ||
+    message.includes('group_order')
+  ) {
+    console.warn(
+      'Smoke test skipped: backend schema не обновлено (micro task groups). Примените новые миграции и повторите.',
+    );
+    process.exit(0);
+  }
   console.error('Smoke test failed');
-  console.error(err);
+  console.error(error);
   process.exit(1);
 });

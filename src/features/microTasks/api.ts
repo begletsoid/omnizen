@@ -4,6 +4,11 @@ import type {
   MicroTaskOrderUpdatePayload,
   MicroTaskRecord,
   MicroTaskUpdate,
+  MicroTaskGroup,
+  MicroTaskGroupOrderUpdatePayload,
+  MicroTaskGroupTemplate,
+  MicroTaskGroupTemplateItem,
+  MicroTaskGroupTaskUpdatePayload,
   TaskCategory,
   TaskCategoryBuffer,
   TaskTag,
@@ -44,6 +49,103 @@ export async function getMicroTasks(widgetId: string) {
     .eq('widget_id', widgetId)
     .is('archived_at', null)
     .order('order', { ascending: true });
+}
+
+export async function getMicroTaskGroups(widgetId: string) {
+  const client = requireSupabase();
+  return client
+    .from('micro_task_groups')
+    .select('*')
+    .eq('widget_id', widgetId)
+    .order('order', { ascending: true });
+}
+
+export async function createMicroTaskGroup(payload: Pick<MicroTaskGroup, 'widget_id' | 'user_id' | 'name' | 'order'>) {
+  const client = requireSupabase();
+  return client.from('micro_task_groups').insert(payload).select('*').single();
+}
+
+export async function updateMicroTaskGroup(id: string, payload: Partial<Pick<MicroTaskGroup, 'name' | 'order'>>) {
+  const client = requireSupabase();
+  return client.from('micro_task_groups').update(payload).eq('id', id).select('*').single();
+}
+
+export async function deleteMicroTaskGroup(id: string) {
+  const client = requireSupabase();
+  return client.from('micro_task_groups').delete().eq('id', id);
+}
+
+export async function listMicroTaskGroupTemplates(userId: string) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('micro_task_group_templates')
+    .select('*')
+    .eq('user_id', userId)
+    .order('name');
+  if (error) throw error;
+  return (data ?? []) as MicroTaskGroupTemplate[];
+}
+
+export async function listMicroTaskGroupTemplateItems(templateId: string) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('micro_task_group_template_items')
+    .select('*')
+    .eq('template_id', templateId)
+    .order('order');
+  if (error) throw error;
+  return (data ?? []) as MicroTaskGroupTemplateItem[];
+}
+
+export async function createMicroTaskGroupTemplate(payload: Pick<MicroTaskGroupTemplate, 'user_id' | 'name'>) {
+  const client = requireSupabase();
+  return client
+    .from('micro_task_group_templates')
+    .upsert(payload, { onConflict: 'user_id,name' })
+    .select('*')
+    .single();
+}
+
+export async function createMicroTaskGroupTemplateItems(
+  templateId: string,
+  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>,
+) {
+  const client = requireSupabase();
+  if (!items.length) return { data: [], error: null };
+  return client
+    .from('micro_task_group_template_items')
+    .insert(
+      items.map((item) => ({
+        template_id: templateId,
+        title: item.title,
+        category_ids: item.category_ids,
+        order: item.order,
+      })),
+    )
+    .select('*');
+}
+
+export async function replaceMicroTaskGroupTemplateItems(
+  templateId: string,
+  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>,
+) {
+  const client = requireSupabase();
+  const { error: deleteError } = await client
+    .from('micro_task_group_template_items')
+    .delete()
+    .eq('template_id', templateId);
+  if (deleteError) throw deleteError;
+  return createMicroTaskGroupTemplateItems(templateId, items);
+}
+
+export async function deleteMicroTaskGroupTemplate(templateId: string, userId: string) {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('micro_task_group_templates')
+    .delete()
+    .eq('id', templateId)
+    .eq('user_id', userId);
+  if (error) throw error;
 }
 
 export async function createMicroTask(payload: MicroTaskInsert) {
@@ -90,7 +192,23 @@ export async function reorderMicroTasks(params: {
   if (error) throw error;
 }
 
-export async function startMicroTaskTimer(taskId: string, _userId: string) {
+export async function reorderMicroTaskItems(params: {
+  widgetId: string;
+  userId: string;
+  taskUpdates: MicroTaskGroupTaskUpdatePayload[];
+  groupUpdates: MicroTaskGroupOrderUpdatePayload[];
+}) {
+  const client = requireSupabase();
+  const { error } = await client.rpc('reorder_micro_task_items', {
+    p_widget_id: params.widgetId,
+    p_user_id: params.userId,
+    p_task_updates: params.taskUpdates,
+    p_group_updates: params.groupUpdates,
+  });
+  if (error) throw error;
+}
+
+export async function startMicroTaskTimer(taskId: string) {
   const client = requireSupabase();
   const { data, error } = await client.rpc('start_micro_task_timer', {
     p_task_id: taskId,
@@ -99,7 +217,7 @@ export async function startMicroTaskTimer(taskId: string, _userId: string) {
   return data as MicroTaskRecord;
 }
 
-export async function pauseMicroTaskTimer(taskId: string, _userId: string) {
+export async function pauseMicroTaskTimer(taskId: string) {
   const client = requireSupabase();
   const { data, error } = await client.rpc('pause_micro_task_timer', {
     p_task_id: taskId,
@@ -146,17 +264,22 @@ export async function listTaskCategories(userId: string) {
     .eq('user_id', userId)
     .order('name');
   if (error) throw error;
-  return (data ?? []).map((category: any) => ({
-    ...category,
-    tags:
-      category.tags?.map((link: any) => ({
-        id: link.task_tags.id,
-        name: link.task_tags.name,
-        user_id: link.task_tags.user_id,
-        created_at: link.task_tags.created_at,
-        updated_at: link.task_tags.updated_at,
-      })) ?? [],
-  })) as TaskCategory[];
+  type RawTagLink = { task_tags: { id: string; name: string; user_id: string; created_at: string; updated_at: string } };
+  type RawCategory = Omit<TaskCategory, 'tags'> & { tags?: RawTagLink[] };
+  return (data ?? []).map((category) => {
+    const raw = category as unknown as RawCategory;
+    return {
+      ...raw,
+      tags:
+        raw.tags?.map((link) => ({
+          id: link.task_tags.id,
+          name: link.task_tags.name,
+          user_id: link.task_tags.user_id,
+          created_at: link.task_tags.created_at,
+          updated_at: link.task_tags.updated_at,
+        })) ?? [],
+    };
+  }) as TaskCategory[];
 }
 
 export async function createTaskCategory(name: string, userId: string) {

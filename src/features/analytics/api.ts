@@ -118,7 +118,7 @@ export async function listCompletedTasksWithCategories(params: CompletedTasksPar
     )
     .eq('is_done', true)
     .eq('user_id', params.userId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: true });
 
   if (params.from) {
     query.gte('created_at', params.from);
@@ -135,22 +135,37 @@ export async function listCompletedTasksWithCategories(params: CompletedTasksPar
   const { data, error } = await query;
   if (error) throw error;
 
-  return (data ?? []).map((task: any) => ({
-    ...task,
-    categories:
-      task.categories?.map((link: any) => ({
-        id: link.task_categories.id,
-        name: link.task_categories.name,
-        is_auto: link.task_categories.is_auto,
-        color: link.task_categories.color,
-        tags:
-          link.task_categories.tags?.map((tagLink: any) => ({
-            id: tagLink.task_tags.id,
-            name: tagLink.task_tags.name,
-            user_id: tagLink.task_tags.user_id,
-            created_at: tagLink.task_tags.created_at,
-            updated_at: tagLink.task_tags.updated_at,
-          })) ?? [],
-      })) ?? [],
-  })) as CompletedTaskWithCategories[];
+  type RawTagLink = { task_tags: { id: string; name: string; user_id: string; created_at: string; updated_at: string } };
+  type RawCategoryLink = {
+    task_categories: {
+      id: string;
+      name: string;
+      is_auto: boolean;
+      color: string | null;
+      tags?: RawTagLink[];
+    };
+  };
+  type RawTask = Omit<CompletedTaskWithCategories, 'categories'> & { categories?: RawCategoryLink[] };
+
+  return (data ?? []).map((task) => {
+    const raw = task as unknown as RawTask;
+    return {
+      ...raw,
+      categories:
+        raw.categories?.map((link) => ({
+          id: link.task_categories.id,
+          name: link.task_categories.name,
+          is_auto: link.task_categories.is_auto,
+          color: link.task_categories.color,
+          tags:
+            link.task_categories.tags?.map((tagLink) => ({
+              id: tagLink.task_tags.id,
+              name: tagLink.task_tags.name,
+              user_id: tagLink.task_tags.user_id,
+              created_at: tagLink.task_tags.created_at,
+              updated_at: tagLink.task_tags.updated_at,
+            })) ?? [],
+        })) ?? [],
+    };
+  }) as CompletedTaskWithCategories[];
 }

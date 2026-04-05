@@ -21,6 +21,8 @@ import { useAuthStore } from '../stores/authStore';
 import { AnalyticsWidget } from './analytics/AnalyticsWidget';
 import { HabitsWidget } from './habits/HabitsWidget';
 import { MicroTasksWidget } from './microTasks/MicroTasksWidget';
+import { TasksWidget } from './tasks/TasksWidget';
+import { CrossWidgetDragProvider } from './tasks/CrossWidgetDragContext';
 
 import { WidgetPlaceholder } from './WidgetPlaceholder';
 import type { WidgetPlaceholderProps } from './WidgetPlaceholder';
@@ -51,6 +53,11 @@ const widgetMeta: Record<
     description: 'Отчёты по завершённым задачам, таймеры и графики.',
     accent: 'cyan',
   },
+  goals: {
+    title: 'Задачи',
+    description: 'Список задач с ценностью, приоритизацией и периодическими задачами.',
+    accent: 'amber',
+  },
   image: {
     title: 'Виджет-картинка',
     description: 'Загрузка изображений, перемещение и изменение размеров.',
@@ -79,6 +86,7 @@ export function DashboardShell() {
 
   useEffect(() => {
     if (!remoteLayout.length) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalLayout(remoteLayout.map((item) => ({ ...item })));
   }, [layoutSignature, remoteLayout]);
 
@@ -188,6 +196,7 @@ export function DashboardShell() {
   const layoutReady = Boolean(layoutItems.length);
 
   return (
+    <CrossWidgetDragProvider>
     <div className="min-h-screen bg-background text-text">
       <header className="flex flex-col gap-5 px-6 pb-8 pt-10 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -285,6 +294,16 @@ export function DashboardShell() {
                   );
                 } else if (item.type === 'analytics') {
                   content = <AnalyticsWidget widgetId={item.widget_id} />;
+                } else if (item.type === 'goals') {
+                  content = (
+                    <TasksWidget
+                      widgetId={item.widget_id}
+                      config={widget?.config ?? null}
+                      onUpdateConfig={
+                        widget ? (patch) => handleWidgetConfigPatch(widget, patch) : undefined
+                      }
+                    />
+                  );
                 } else {
                   content = (
                     <div className="h-full">
@@ -315,6 +334,7 @@ export function DashboardShell() {
         )}
       </main>
     </div>
+    </CrossWidgetDragProvider>
   );
 }
 
@@ -349,15 +369,12 @@ function DraggableWidget({
 
   const baseX = (item.x ?? 0) * columnStep;
   const baseY = (item.y ?? 0) * rowStep;
-  const translateX = baseX + (transform?.x ?? 0);
-  const translateY = baseY + (transform?.y ?? 0);
   const style: CSSProperties = {
-    transform: CSS.Transform.toString({
-      x: translateX,
-      y: translateY,
-      scaleX: 1,
-      scaleY: 1,
-    }),
+    left: baseX,
+    top: baseY,
+    transform: transform
+      ? CSS.Transform.toString({ x: transform.x, y: transform.y, scaleX: 1, scaleY: 1 })
+      : undefined,
     zIndex: isDragging ? 100 : (item.z ?? 1),
   };
 

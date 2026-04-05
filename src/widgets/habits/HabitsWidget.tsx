@@ -234,12 +234,12 @@ const resizeStateRef = useRef<{
     [applyHeight],
   );
 
-  const stopResizing = useCallback(() => {
+  const stopResizing = useCallback(function handleStopResizing() {
     if (!resizeStateRef.current) return;
     resizeStateRef.current = null;
     window.removeEventListener('pointermove', handleResizeMove);
-    window.removeEventListener('pointerup', stopResizing);
-    window.removeEventListener('pointercancel', stopResizing);
+    window.removeEventListener('pointerup', handleStopResizing);
+    window.removeEventListener('pointercancel', handleStopResizing);
   }, [handleResizeMove]);
 
   const handleResizeStart = useCallback(
