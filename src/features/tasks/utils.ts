@@ -49,3 +49,25 @@ export function computeEfficiency(value: number, expectedHours: number): string 
   if (!expectedHours || expectedHours === 0) return '—';
   return String(Math.round(value / expectedHours));
 }
+
+export function placeCompletedGoalOrder(goals: GoalRecord[], completedId: string): string[] {
+  const completed = goals.find((g) => g.id === completedId);
+  if (!completed) return goals.map((g) => g.id);
+
+  const rest = goals.filter((g) => g.id !== completedId);
+
+  let insertAt = rest.length;
+  const firstDone = rest.findIndex((g) => g.is_done);
+  if (firstDone !== -1) {
+    insertAt = firstDone;
+  } else {
+    const firstLocked = rest.findIndex((g) => g.is_locked && !g.is_done);
+    if (firstLocked !== -1) insertAt = firstLocked;
+  }
+
+  return [
+    ...rest.slice(0, insertAt).map((g) => g.id),
+    completed.id,
+    ...rest.slice(insertAt).map((g) => g.id),
+  ];
+}

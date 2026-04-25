@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sortGoals, computeEfficiency } from '../utils';
+import { sortGoals, computeEfficiency, placeCompletedGoalOrder } from '../utils';
 import type { GoalRecord } from '../types';
 
 const goal = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
@@ -12,6 +12,7 @@ const goal = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   is_recurring: false,
   value: 10,
   expected_hours: 2,
+  sort_order: 1,
   archived_at: null,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
@@ -68,5 +69,53 @@ describe('computeEfficiency', () => {
 
   it('handles zero value', () => {
     expect(computeEfficiency(0, 5)).toBe('0');
+  });
+});
+
+describe('placeCompletedGoalOrder', () => {
+  it('places completed goal just above first done goal', () => {
+    const goals = [
+      goal({ id: 'a' }),
+      goal({ id: 'b' }),
+      goal({ id: 'c', is_done: true }),
+    ];
+    const order = placeCompletedGoalOrder(goals, 'a');
+    expect(order).toEqual(['b', 'a', 'c']);
+  });
+
+  it('places completed goal above first locked goal when no done goals', () => {
+    const goals = [
+      goal({ id: 'a' }),
+      goal({ id: 'b' }),
+      goal({ id: 'target', is_locked: true }),
+    ];
+    const order = placeCompletedGoalOrder(goals, 'a');
+    expect(order).toEqual(['b', 'a', 'target']);
+  });
+
+  it('sends completed goal to the bottom when no done/locked goals below', () => {
+    const goals = [
+      goal({ id: 'a' }),
+      goal({ id: 'b' }),
+      goal({ id: 'c' }),
+    ];
+    const order = placeCompletedGoalOrder(goals, 'a');
+    expect(order).toEqual(['b', 'c', 'a']);
+  });
+
+  it('prefers first done over first locked when both exist', () => {
+    const goals = [
+      goal({ id: 'a' }),
+      goal({ id: 'locked', is_locked: true }),
+      goal({ id: 'done', is_done: true }),
+    ];
+    const order = placeCompletedGoalOrder(goals, 'a');
+    expect(order).toEqual(['locked', 'a', 'done']);
+  });
+
+  it('returns identity ids when goal is not found', () => {
+    const goals = [goal({ id: 'a' }), goal({ id: 'b' })];
+    const order = placeCompletedGoalOrder(goals, 'missing');
+    expect(order).toEqual(['a', 'b']);
   });
 });

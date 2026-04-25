@@ -4,16 +4,23 @@ import { describe, expect, it, vi } from 'vitest';
 import type { LayoutItem } from '../../features/layout/types';
 import { DraggableWidget } from '../DashboardShell';
 
-vi.mock('@dnd-kit/core', () => ({
-  useDraggable: () => ({
-    setNodeRef: vi.fn(),
-    attributes: {},
-    listeners: {},
-    setActivatorNodeRef: vi.fn(),
-    transform: null,
-    isDragging: false,
-  }),
-}));
+// Partial mock for @dnd-kit/core — preserve everything except the hooks we
+// care about stubbing. Otherwise transitive imports (DragOverlay helpers in
+// RitualWidget) blow up with "No X export is defined on the mock".
+vi.mock('@dnd-kit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@dnd-kit/core')>();
+  return {
+    ...actual,
+    useDraggable: () => ({
+      setNodeRef: vi.fn(),
+      attributes: {},
+      listeners: {},
+      setActivatorNodeRef: vi.fn(),
+      transform: null,
+      isDragging: false,
+    }),
+  };
+});
 
 vi.mock('@dnd-kit/utilities', () => ({
   CSS: {

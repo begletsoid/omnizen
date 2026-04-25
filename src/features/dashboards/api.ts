@@ -17,6 +17,9 @@ const DEFAULT_WIDGETS: Array<{ type: WidgetRecord['type']; config?: Record<strin
   { type: 'tasks', config: { title: 'Микрозадачи' } },
   { type: 'goals', config: { title: 'Задачи' } },
   { type: 'analytics', config: { title: 'Аналитика' } },
+  { type: 'heatmap', config: { title: 'Хитмапа' } },
+  { type: 'ritual', config: { title: 'Ритуал' } },
+  { type: 'notes-board', config: { title: 'Доска напоминаний' } },
   { type: 'image', config: { title: 'Визуальный виджет' } },
 ];
 
@@ -151,6 +154,48 @@ async function ensureWidgets(dashboard: DashboardRecord): Promise<WidgetRecord[]
         .single();
       if (insertGoalsError) throw insertGoalsError;
       widgets = [...widgets, createdGoals as WidgetRecord];
+    }
+    const hasHeatmap = widgets.some((w) => w.type === 'heatmap');
+    if (!hasHeatmap) {
+      const { data: createdHeatmap, error: insertHeatmapError } = await supabase
+        .from('widgets')
+        .insert({
+          dashboard_id: dashboard.id,
+          type: 'heatmap',
+          config: { title: 'Хитмапа' },
+        })
+        .select('*')
+        .single();
+      if (insertHeatmapError) throw insertHeatmapError;
+      widgets = [...widgets, createdHeatmap as WidgetRecord];
+    }
+    const hasRitual = widgets.some((w) => w.type === 'ritual');
+    if (!hasRitual) {
+      const { data: createdRitual, error: insertRitualError } = await supabase
+        .from('widgets')
+        .insert({
+          dashboard_id: dashboard.id,
+          type: 'ritual',
+          config: { title: 'Ритуал' },
+        })
+        .select('*')
+        .single();
+      if (insertRitualError) throw insertRitualError;
+      widgets = [...widgets, createdRitual as WidgetRecord];
+    }
+    const hasNotesBoard = widgets.some((w) => w.type === 'notes-board');
+    if (!hasNotesBoard) {
+      const { data: createdNotes, error: insertNotesError } = await supabase
+        .from('widgets')
+        .insert({
+          dashboard_id: dashboard.id,
+          type: 'notes-board',
+          config: { title: 'Доска напоминаний' },
+        })
+        .select('*')
+        .single();
+      if (insertNotesError) throw insertNotesError;
+      widgets = [...widgets, createdNotes as WidgetRecord];
     }
     return widgets;
   }

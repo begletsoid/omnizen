@@ -41,6 +41,14 @@ import {
   useTaskCategories,
   useTaskTags,
 } from '../../features/microTasks/hooks';
+import { parseDurationInput } from '../../features/microTasks/utils';
+import { ConfirmDeleteButton } from '../../components/ConfirmDeleteButton';
+import {
+  CATEGORY_COLOR_PRESETS as SHARED_COLOR_PRESETS,
+  getCategoryColorPreset as sharedGetCategoryColorPreset,
+  pickFirstFreePresetId,
+  resolveColorHex,
+} from '../microTasks/utils/constants';
 import { useAuthStore } from '../../stores/authStore';
 
 type AnalyticsWidgetProps = {
@@ -60,31 +68,12 @@ type Metric = 'sum' | 'avg' | 'percent';
 type SeriesPoint = { key: string; label: string; value: number };
 type AnalyticsTasksCache = { pages: CompletedTaskWithCategories[][]; pageParams: unknown[] };
 
-type CategoryColorPreset = {
-  id: string;
-  chipClass: string;
-  cardClass: string;
-};
-
-const CATEGORY_COLOR_PRESETS: CategoryColorPreset[] = [
-  { id: 'neutral', chipClass: 'bg-white/10 border-white/20 text-white', cardClass: 'border border-white/10 bg-white/5' },
-  { id: 'rose', chipClass: 'bg-rose-500/15 border-rose-400/40 text-rose-100', cardClass: 'border border-rose-400/30 bg-rose-500/5' },
-  { id: 'amber', chipClass: 'bg-amber-500/15 border-amber-400/40 text-amber-100', cardClass: 'border border-amber-400/30 bg-amber-500/5' },
-  { id: 'emerald', chipClass: 'bg-emerald-500/15 border-emerald-400/40 text-emerald-100', cardClass: 'border border-emerald-400/30 bg-emerald-500/5' },
-  { id: 'sky', chipClass: 'bg-sky-500/15 border-sky-400/40 text-sky-100', cardClass: 'border border-sky-400/30 bg-sky-500/5' },
-  { id: 'violet', chipClass: 'bg-violet-500/15 border-violet-400/40 text-violet-100', cardClass: 'border border-violet-400/30 bg-violet-500/5' },
-  { id: 'pink', chipClass: 'bg-pink-500/15 border-pink-400/40 text-pink-100', cardClass: 'border border-pink-400/30 bg-pink-500/5' },
-];
-
-const CATEGORY_COLOR_MAP = CATEGORY_COLOR_PRESETS.reduce<Record<string, CategoryColorPreset>>((acc, preset) => {
-  acc[preset.id] = preset;
-  return acc;
-}, {});
-
-function getCategoryColorPreset(colorId?: string | null) {
-  if (!colorId) return CATEGORY_COLOR_PRESETS[0];
-  return CATEGORY_COLOR_MAP[colorId] ?? CATEGORY_COLOR_PRESETS[0];
-}
+// Reuse the shared category palette so analytics timers, tags and categories all
+// share one single table of 7 colors. MAX_TIMERS derives from its length — cap
+// is automatic if the palette ever grows.
+const CATEGORY_COLOR_PRESETS = SHARED_COLOR_PRESETS;
+const MAX_TIMERS = CATEGORY_COLOR_PRESETS.length;
+const getCategoryColorPreset = sharedGetCategoryColorPreset;
 
 type LabelBox = { x1: number; y1: number; x2: number; y2: number };
 
@@ -224,6 +213,10 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   const [openTimerTagId, setOpenTimerTagId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingTaskTitle, setEditingTaskTitle] = useState('');
+  const [editingTimeTaskId, setEditingTimeTaskId] = useState<string | null>(null);
+  const [timeDraft, setTimeDraft] = useState('');
+  const [isTimeInvalid, setIsTimeInvalid] = useState(false);
+  const [openTimerColorId, setOpenTimerColorId] = useState<string | null>(null);
   const tasksScrollRef = useRef<HTMLDivElement | null>(null);
   const dayRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -370,6 +363,41 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
     cancelEditingTask();
   };
 
+  const startEditingTime = (task: CompletedTaskWithCategories) => {
+    setEditingTimeTaskId(task.id);
+    setTimeDraft(formatDuration(task.elapsed_seconds));
+    setIsTimeInvalid(false);
+  };
+
+  const cancelEditingTime = () => {
+    setEditingTimeTaskId(null);
+    setTimeDraft('');
+    setIsTimeInvalid(false);
+  };
+
+  const commitEditingTime = (task: CompletedTaskWithCategories) => {
+    if (editingTimeTaskId !== task.id) return;
+    const seconds = parseDurationInput(timeDraft);
+    if (seconds === null) {
+      setIsTimeInvalid(true);
+      return;
+    }
+    // Completed tasks here are already paused (is_done=true), so just overwrite
+    // elapsed_seconds — no need to touch timer_state/last_started_at.
+    updateTaskMutation.mutate({ id: task.id, patch: { elapsed_seconds: seconds } });
+    cancelEditingTime();
+  };
+
+  const handleTimeKeyDown = (event: KeyboardEvent<HTMLInputElement>, task: CompletedTaskWithCategories) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitEditingTime(task);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelEditingTime();
+    }
+  };
+
   const handleEditKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>, task: CompletedTaskWithCategories) => {
     if (event.key === 'Enter') {
       event.preventDefault();
@@ -407,9 +435,29 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
 
   const addTimer = () => {
     if (!userId) return;
+    if ((timers?.length ?? 0) >= MAX_TIMERS) return;
     const sortOrder = (timers?.length ?? 0) + 1;
-    createTimer.mutate({ name: `Таймер ${sortOrder}`, sort_order: sortOrder });
+    const color = pickFirstFreePresetId((timers ?? []).map((t) => t.color));
+    createTimer.mutate({
+      name: `Таймер ${sortOrder}`,
+      sort_order: sortOrder,
+      color: color ?? null,
+    });
   };
+
+  /** Preset ids already taken by OTHER timers — used to grey out chips in the picker. */
+  const colorUsageByTimer = useMemo(() => {
+    const usedByOthers = new Map<string, Set<string>>();
+    for (const target of timers ?? []) {
+      const used = new Set<string>();
+      for (const other of timers ?? []) {
+        if (other.id === target.id) continue;
+        if (other.color && !other.color.startsWith('#')) used.add(other.color);
+      }
+      usedByOthers.set(target.id, used);
+    }
+    return usedByOthers;
+  }, [timers]);
 
   const updateTimerField = (timer: AnalyticsTimer, patch: Partial<AnalyticsTimer>) => {
     updateTimer.mutate({ id: timer.id, ...patch });
@@ -619,15 +667,58 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
             {filteredTimers.map((timer) => {
               const mask = decodeDaysMask(timer.days_mask);
                   const isFilter = filterTimerId === timer.id;
+              const usedByOthers = colorUsageByTimer.get(timer.id) ?? new Set<string>();
               return (
                 <div key={timer.id} className="rounded-xl border border-white/10 bg-background/70 p-3 text-xs">
                   <div className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={timer.color ?? '#7dd3fc'}
-                      onChange={(e) => updateTimerField(timer, { color: e.target.value })}
-                      className="h-8 w-10 rounded-md border border-white/10 bg-transparent p-0"
-                    />
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setOpenTimerColorId((prev) => (prev === timer.id ? null : timer.id))}
+                        aria-label="Выбрать цвет таймера"
+                        aria-haspopup="menu"
+                        aria-expanded={openTimerColorId === timer.id}
+                        className="h-7 w-7 rounded-full border border-white/20 shadow-inner transition hover:border-white/50"
+                        style={{ backgroundColor: resolveColorHex(timer.color) }}
+                      />
+                      {openTimerColorId === timer.id && (
+                        <>
+                          <div
+                            aria-hidden
+                            className="fixed inset-0 z-10"
+                            onClick={() => setOpenTimerColorId(null)}
+                          />
+                          <div
+                            role="menu"
+                            className="absolute left-0 top-9 z-20 grid w-max grid-cols-7 gap-1 rounded-xl border border-white/10 bg-background/95 p-1.5 shadow-2xl backdrop-blur"
+                          >
+                            {CATEGORY_COLOR_PRESETS.map((preset) => {
+                              const taken = usedByOthers.has(preset.id);
+                              const selected = timer.color === preset.id;
+                              return (
+                                <button
+                                  key={preset.id}
+                                  type="button"
+                                  disabled={taken && !selected}
+                                  onClick={() => {
+                                    updateTimerField(timer, { color: preset.id });
+                                    setOpenTimerColorId(null);
+                                  }}
+                                  title={taken && !selected ? `${preset.label} — занят другим таймером` : preset.label}
+                                  aria-label={preset.label}
+                                  className={clsx(
+                                    'h-6 w-6 rounded-full border transition',
+                                    selected ? 'border-white ring-2 ring-white/50' : 'border-white/20 hover:border-white/60',
+                                    taken && !selected && 'cursor-not-allowed opacity-30',
+                                  )}
+                                  style={{ backgroundColor: preset.hex }}
+                                />
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                    </div>
                     <input
                       type="text"
                       defaultValue={timer.name}
@@ -637,7 +728,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                           updateTimerField(timer, { name: value });
                         }
                       }}
-                      className="w-full rounded-md border border-white/10 bg-white/5 px-2 py-1 text-white"
+                      className="w-full rounded-md border border-white/10 bg-white/5 px-2 py-1 text-sm font-semibold text-white"
                       placeholder="Название таймера"
                     />
                     <button
@@ -820,7 +911,9 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
           <button
             type="button"
             onClick={addTimer}
-            className="rounded-lg border border-dashed border-white/30 px-3 py-2 text-xs text-muted transition hover:border-white/60 hover:text-white"
+            disabled={(timers?.length ?? 0) >= MAX_TIMERS}
+            title={(timers?.length ?? 0) >= MAX_TIMERS ? `Достигнут лимит таймеров (${MAX_TIMERS})` : undefined}
+            className="rounded-lg border border-dashed border-white/30 px-3 py-2 text-xs text-muted transition hover:border-white/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/30 disabled:hover:text-muted"
           >
             + Таймер
           </button>
@@ -858,7 +951,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                         >
                           <span
                             className="h-1.5 w-1.5 rounded-full"
-                            style={{ backgroundColor: entry.timer.color ?? '#7dd3fc' }}
+                            style={{ backgroundColor: resolveColorHex(entry.timer.color) }}
                           />
                           <span className="font-normal">{entry.timer.name}</span>
                           <span className="font-semibold text-white">{entry.timeLabel}</span>
@@ -901,19 +994,40 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                             </button>
                           )}
                           <div className="flex items-center gap-2 text-sm text-white/70">
-                            <span className="font-medium tabular-nums">{formatDuration(task.elapsed_seconds)}</span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (window.confirm('Удалить задачу?')) {
-                                  deleteTaskMutation.mutate(task.id);
-                                }
-                              }}
-                              className="text-white/60 transition hover:text-rose-300"
-                              aria-label="Удалить задачу"
-                            >
-                              ✕
-                            </button>
+                            {editingTimeTaskId === task.id ? (
+                              <input
+                                type="text"
+                                value={timeDraft}
+                                onChange={(event) => {
+                                  setTimeDraft(event.target.value);
+                                  setIsTimeInvalid(false);
+                                }}
+                                onBlur={() => commitEditingTime(task)}
+                                onKeyDown={(event) => handleTimeKeyDown(event, task)}
+                                autoFocus
+                                aria-invalid={isTimeInvalid || undefined}
+                                aria-label="Редактировать потраченное время"
+                                placeholder="ч:мм:сс"
+                                className={clsx(
+                                  'w-24 rounded-xl bg-white/80 px-2 py-0.5 text-center font-medium tabular-nums text-black outline-none',
+                                  isTimeInvalid && 'ring-1 ring-rose-400',
+                                )}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => startEditingTime(task)}
+                                className="font-medium tabular-nums text-white/80 transition hover:text-white"
+                                aria-label="Редактировать потраченное время"
+                              >
+                                {formatDuration(task.elapsed_seconds)}
+                              </button>
+                            )}
+                            <ConfirmDeleteButton
+                              onConfirm={() => deleteTaskMutation.mutate(task.id)}
+                              label="Удалить задачу"
+                              className="h-4 w-4 text-white/60"
+                            />
                           </div>
                         </div>
                         <CategoryEditor
@@ -1100,7 +1214,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                     </g>
                     {chartSeries.map(({ timer, points }) => {
                       if (!points.length) return null;
-                      const color = timer.color ?? '#7dd3fc';
+                      const color = resolveColorHex(timer.color);
                       const pointMap = new Map(points.map((p) => [p.key, p]));
                       let path = '';
                       xKeys.forEach((key, idx) => {
@@ -1155,7 +1269,7 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
               <div className="mt-2 flex flex-wrap gap-3 text-2xl text-muted">
                 {chartSeries.map(({ timer }) => (
                   <span key={timer.id} className="flex items-center gap-1">
-                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: timer.color ?? '#7dd3fc' }} />
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: resolveColorHex(timer.color) }} />
                     {timer.name}
                   </span>
                 ))}

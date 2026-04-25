@@ -20,13 +20,13 @@ describe('layout utils', () => {
       z: idx,
     }));
 
-  it('clampGridPosition ограничивает координаты по сетке с субделениями', () => {
+  it('clampGridPosition разрешает двигать вправо за границу (бесконечный борд)', () => {
     const item = buildLayout(1)[0];
     const result = clampGridPosition({ x: GRID_COLUMNS + 5.6, y: -3.2 }, item);
-    expect(result).toMatchObject({
-      x: GRID_COLUMNS - item.w!,
-      y: 0,
-    });
+    // Top/left still clamped to 0, but the right edge is unrestricted so the
+    // user can park widgets past the initial viewport.
+    expect(result.x).toBeGreaterThan(GRID_COLUMNS);
+    expect(result.y).toBe(0);
   });
 
   it('clampGridPosition привязывает координату к шагу 1/GRID_SUBDIVISIONS', () => {
