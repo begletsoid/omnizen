@@ -232,6 +232,12 @@ export function usePointerDnd({ tasks, groups, onReorder }: UsePointerDndParams)
   const handlePointerDown = useCallback(
     (itemId: string, e: React.PointerEvent) => {
       if (e.button !== 0) return;
+      // Time-transfer drag starts inside the timer pill — let it own the
+      // pointer instead of arming a row reorder. Without this guard the user
+      // can never drag time off a task because the row would steal the
+      // press at 6px and start sorting.
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-time-transfer-source]')) return;
       const el = itemRefsMap.current.get(itemId);
       const rect = el?.getBoundingClientRect();
       const initialCenterY = rect ? rect.top + rect.height / 2 : e.clientY;

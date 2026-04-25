@@ -93,6 +93,7 @@ let goalsWidgetId: string | null = null;
     await runHabitReorderSmoke(habitsWidgetId, userId);
     if (microTasksWidgetId) {
       await runMicroTasksSmoke(microTasksWidgetId, userId);
+      await runTimeTransferSmoke(microTasksWidgetId, userId);
     }
     if (analyticsWidgetId) {
       await runAnalyticsSmoke(userId);
@@ -312,6 +313,161 @@ async function runMicroTasksSmoke(widgetId: string, userId: string) {
   const orders = afterReorder.map((task) => task.order);
   if (orders.some((order, idx) => order !== expected[idx])) {
     throw new Error('Micro task reorder did not normalize order values');
+  }
+}
+
+/**
+ * Exercises the `transfer_micro_task_time` RPC across the four interesting
+ * combinations of source/target running state, plus all three RAISE paths.
+ * Verifies stored elapsed_seconds and that `last_started_at` is rebased on
+ * running tasks so the per-second tick doesn't visually skip.
+ */
+async function runTimeTransferSmoke(widgetId: string, userId: string) {
+  if (!supabase) throw new Error('Supabase client missing');
+
+  // Clean slate so other smoke runs don't pollute totals.
+  await supabase.from('micro_tasks').delete().eq('widget_id', widgetId);
+
+  const seed = [
+    { title: 'Transfer Source A', order: 1, elapsed_seconds: 600 }, // 10 min
+    { title: 'Transfer Target B', order: 2, elapsed_seconds: 0 },
+  ].map((task) => ({
+    ...task,
+    widget_id: widgetId,
+    user_id: userId,
+    is_done: false,
+  }));
+  const seedResult = await supabase.from('micro_tasks').insert(seed).select('*');
+  if (seedResult.error) throw seedResult.error;
+  const [taskA, taskB] = seedResult.data!;
+
+  // ── Case 1: paused → paused. 5 minutes A → B.
+  {
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskB.id,
+      p_seconds: 300,
+      p_user_id: userId,
+    });
+    if (error) throw error;
+    const { data: after } = await supabase
+      .from('micro_tasks')
+      .select('id, elapsed_seconds')
+      .in('id', [taskA.id, taskB.id]);
+    const aRow = after!.find((t) => t.id === taskA.id)!;
+    const bRow = after!.find((t) => t.id === taskB.id)!;
+    if (aRow.elapsed_seconds !== 300) {
+      throw new Error(`paused→paused: expected A=300, got ${aRow.elapsed_seconds}`);
+    }
+    if (bRow.elapsed_seconds !== 300) {
+      throw new Error(`paused→paused: expected B=300, got ${bRow.elapsed_seconds}`);
+    }
+  }
+
+  // ── Case 2: running → paused. Start A, wait 1.2s, transfer 60s.
+  await supabase.rpc('start_micro_task_timer', { p_task_id: taskA.id });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const beforeRunningTransfer = Date.now();
+  {
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskB.id,
+      p_seconds: 60,
+      p_user_id: userId,
+    });
+    if (error) throw error;
+    const { data: after } = await supabase
+      .from('micro_tasks')
+      .select('id, elapsed_seconds, timer_state, last_started_at')
+      .in('id', [taskA.id, taskB.id]);
+    const aRow = after!.find((t) => t.id === taskA.id)!;
+    const bRow = after!.find((t) => t.id === taskB.id)!;
+    // A was at stored=300 + ~1.2s delta. After rebase + minus 60s,
+    // stored ≈ 300 + 1 - 60 = 241. last_started_at must be near now.
+    if (aRow.timer_state !== 'running') {
+      throw new Error('running→paused: A should still be running');
+    }
+    if (Math.abs(aRow.elapsed_seconds - 241) > 3) {
+      throw new Error(
+        `running→paused: expected A.elapsed≈241, got ${aRow.elapsed_seconds}`,
+      );
+    }
+    const lsa = Date.parse(aRow.last_started_at);
+    if (!Number.isFinite(lsa) || Math.abs(lsa - beforeRunningTransfer) > 5_000) {
+      throw new Error('running→paused: A.last_started_at was not rebased to now()');
+    }
+    if (bRow.elapsed_seconds !== 360) {
+      throw new Error(`running→paused: expected B=360, got ${bRow.elapsed_seconds}`);
+    }
+  }
+
+  // Pause A so it doesn't keep accumulating during the next assertions.
+  await supabase.rpc('pause_micro_task_timer', { p_task_id: taskA.id });
+
+  // ── Case 3: paused → running. Start B running, transfer 30s from A.
+  await supabase.rpc('start_micro_task_timer', { p_task_id: taskB.id });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  {
+    const { data: bBefore } = await supabase
+      .from('micro_tasks')
+      .select('elapsed_seconds, last_started_at')
+      .eq('id', taskB.id)
+      .single();
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskB.id,
+      p_seconds: 30,
+      p_user_id: userId,
+    });
+    if (error) throw error;
+    const { data: after } = await supabase
+      .from('micro_tasks')
+      .select('id, elapsed_seconds, timer_state, last_started_at')
+      .in('id', [taskA.id, taskB.id]);
+    const bRow = after!.find((t) => t.id === taskB.id)!;
+    if (bRow.timer_state !== 'running') {
+      throw new Error('paused→running: B should still be running');
+    }
+    // B was at stored=360 + ~1.2s delta. Rebased + plus 30 = ~391.
+    if (bRow.elapsed_seconds < bBefore!.elapsed_seconds + 30) {
+      throw new Error(
+        `paused→running: expected B.elapsed >= ${bBefore!.elapsed_seconds + 30}, got ${bRow.elapsed_seconds}`,
+      );
+    }
+  }
+  await supabase.rpc('pause_micro_task_timer', { p_task_id: taskB.id });
+
+  // ── Case 4: error path — RAISE on zero seconds.
+  {
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskB.id,
+      p_seconds: 0,
+      p_user_id: userId,
+    });
+    if (!error) throw new Error('Expected RAISE on zero transfer, got success');
+  }
+
+  // ── Case 5: error path — RAISE on same task.
+  {
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskA.id,
+      p_seconds: 30,
+      p_user_id: userId,
+    });
+    if (!error) throw new Error('Expected RAISE on same-task transfer, got success');
+  }
+
+  // ── Case 6: error path — RAISE on insufficient source time.
+  {
+    const { error } = await supabase.rpc('transfer_micro_task_time', {
+      p_from_task_id: taskA.id,
+      p_to_task_id: taskB.id,
+      p_seconds: 999_999,
+      p_user_id: userId,
+    });
+    if (!error) throw new Error('Expected RAISE on insufficient time, got success');
   }
 }
 

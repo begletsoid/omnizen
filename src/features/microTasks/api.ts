@@ -226,6 +226,30 @@ export async function pauseMicroTaskTimer(taskId: string) {
   return data as MicroTaskRecord;
 }
 
+export type TransferMicroTaskTimeResult = {
+  from_task_id: string;
+  to_task_id: string;
+  seconds: number;
+  applied_at: string;
+};
+
+export async function transferMicroTaskTime(params: {
+  fromTaskId: string;
+  toTaskId: string;
+  seconds: number;
+  userId: string;
+}): Promise<TransferMicroTaskTimeResult> {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc('transfer_micro_task_time', {
+    p_from_task_id: params.fromTaskId,
+    p_to_task_id: params.toTaskId,
+    p_seconds: params.seconds,
+    p_user_id: params.userId,
+  });
+  if (error) throw enhanceRpcError(error, 'transfer_micro_task_time');
+  return data as TransferMicroTaskTimeResult;
+}
+
 export async function listTaskTags(userId: string) {
   const client = requireSupabase();
   const { data, error } = await client

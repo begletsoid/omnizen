@@ -46,6 +46,7 @@ import {
   useTaskCategories,
   useTaskTags,
   useToggleMicroTaskTimer,
+  useTransferMicroTaskTime,
   useUpdateMicroTask,
   useUpdateTaskCategoryColor,
 } from '../../features/microTasks/hooks';
@@ -74,10 +75,13 @@ import { MicroTaskCard } from './components/MicroTaskCard';
 import { GroupHeader } from './components/GroupHeader';
 import { TimerPill, SortableTimerPill } from './components/TimerPill';
 import { TaxonomySelect } from './components/TaxonomySelect';
+import { TimeTransferOverlay } from './components/TimeTransferOverlay';
 import { TagIcon } from './components/Icons';
 import { usePointerDnd } from './hooks/usePointerDnd';
+import { useTimeTransferDrag } from './hooks/useTimeTransferDrag';
 import { useCrossWidgetDrag } from '../tasks/CrossWidgetDragContext';
 import { useTimers, describeTimerTags } from './hooks/useTimers';
+import { computeAvailableSecondsOnSource } from '../../features/microTasks/transferUtils';
 import {
   getCategoryColorPreset,
   CATEGORY_COLOR_PRESETS,
@@ -181,6 +185,7 @@ export function MicroTasksWidget({
   const deleteTask = useDeleteMicroTask(widgetId);
   const reorderItemsMutation = useReorderMicroTaskItems(widgetId);
   const toggleTimer = useToggleMicroTaskTimer(widgetId);
+  const transferTime = useTransferMicroTaskTime(widgetId);
   const archiveTask = useArchiveMicroTask(widgetId);
   const attachCategoryToTask = useAttachCategoryToTask();
   const detachCategoryFromTask = useDetachCategoryFromTask();
@@ -318,6 +323,30 @@ export function MicroTasksWidget({
     groups: effectiveGroups,
     onReorder: handleReorder,
   });
+
+  // Time-transfer drag from a task's timer button.
+  // We pull a stable reference to mutateAsync so the hook's identity stays
+  // stable across renders — otherwise its window listeners (pointermove,
+  // keydown) churn every render and lose mid-drag state.
+  const transferMutateAsync = transferTime.mutateAsync;
+  const handleTransferCommit = useCallback(
+    async (op: { fromTaskId: string; toTaskId: string; seconds: number }) => {
+      await transferMutateAsync(op);
+    },
+    [transferMutateAsync],
+  );
+  const getTaskById = useCallback(
+    (id: string) => taskById.get(id),
+    [taskById],
+  );
+  const transferDrag = useTimeTransferDrag({
+    getTaskById,
+    onCommit: handleTransferCommit,
+  });
+  const transferState = transferDrag.state;
+  const transferEffectiveMinutes = transferDrag.effectiveMinutes;
+  const transferRequestedMinutes = transferDrag.requestedMinutes;
+  const transferValidity = transferDrag.validity;
 
   const timerSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -813,6 +842,33 @@ export function MicroTasksWidget({
       const isTaskRunning = effectiveRunningId === task.id;
       const seconds = taskSecondsMap.get(task.id) ?? computeTaskSeconds(task, isTaskRunning);
       const isDragging = dragState?.draggedId === itemId;
+      const isTransferSource = transferState?.sourceTaskId === task.id;
+      const isTransferTarget =
+        transferState !== null &&
+        transferState.hoveredTargetId === task.id &&
+        transferState.sourceTaskId !== task.id;
+      // While dragging time off this row, the timer label tracks the
+      // committed seconds minus what the user is requesting (clamped to
+      // what's actually available). For running tasks we add the live
+      // delta back so the per-second tick continues to flow.
+      let timeLabelOverride: string | undefined;
+      if (isTransferSource && transferState) {
+        const liveSec = computeAvailableSecondsOnSource(
+          transferState.sourceCommittedSeconds,
+          transferState.sourceTimerState,
+          transferState.sourceLastStartedAt,
+          Date.now(),
+        );
+        const requestedSec = Math.min(
+          transferRequestedMinutes * 60,
+          liveSec,
+        );
+        const previewSec = Math.max(0, liveSec - requestedSec);
+        timeLabelOverride = formatDuration(previewSec);
+      } else if (isTransferTarget && transferEffectiveMinutes > 0) {
+        // Visual reciprocal — hovering target shows the boosted value.
+        timeLabelOverride = formatDuration(seconds + transferEffectiveMinutes * 60);
+      }
       return (
         <MicroTaskCard
           key={task.id}
@@ -829,6 +885,10 @@ export function MicroTasksWidget({
           onArchive={() => handleArchiveTask(task)}
           isArchiving={archiveTask.isPending && archiveTask.variables === task.id}
           onTimeClick={() => handleStartEditingTime(task)}
+          onTimerPointerDown={(e) => transferDrag.beginPress(task.id, e)}
+          timeLabelOverride={timeLabelOverride}
+          isTransferSource={isTransferSource}
+          isTransferTarget={isTransferTarget}
           onTimeChange={(value) => { setTimeDraft(value); setIsTimeInvalid(false); }}
           onTimeCommit={() => handleCommitEditingTime(task)}
           onTimeCancel={() => { setEditingTimeTaskId(null); setTimeDraft(''); setIsTimeInvalid(false); setIsTimeSaving(false); }}
@@ -853,7 +913,7 @@ export function MicroTasksWidget({
         />
       );
     },
-    [effectiveRunningId, taskSecondsMap, computeTaskSeconds, editingTask, editingTimeTaskId, timeDraft, isTimeInvalid, isTimeSaving, taskCategories, archiveTask.isPending, archiveTask.variables, dragState, registerRef, handlePointerDown],
+    [effectiveRunningId, taskSecondsMap, computeTaskSeconds, editingTask, editingTimeTaskId, timeDraft, isTimeInvalid, isTimeSaving, taskCategories, archiveTask.isPending, archiveTask.variables, dragState, registerRef, handlePointerDown, transferDrag, transferState, transferEffectiveMinutes, transferRequestedMinutes],
   );
 
   return (
@@ -1337,6 +1397,14 @@ export function MicroTasksWidget({
           <button type="button" onClick={handleAddTask} className="text-xl text-accent transition hover:text-accent/80" aria-label="Добавить задачу">+</button>
         </div>
       </div>
+      {transferState && (
+        <TimeTransferOverlay
+          pointerX={transferState.pointerX}
+          pointerY={transferState.pointerY}
+          requestedMinutes={transferRequestedMinutes}
+          validity={transferValidity}
+        />
+      )}
     </section>
   );
 }

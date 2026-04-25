@@ -40,6 +40,12 @@ export type MicroTaskCardProps = {
   onDelete: () => void;
   onArchive: () => void;
   onTimeClick: () => void;
+  /**
+   * Pointer-down on the timer button. Provided when the parent runs the
+   * time-transfer drag mechanic — it arms a press that may either turn into
+   * a transfer drag (>6px movement) or fall through to onTimeClick.
+   */
+  onTimerPointerDown?: (e: React.PointerEvent) => void;
   onTimeChange: (value: string) => void;
   onTimeCommit: () => void;
   onTimeCancel: () => void;
@@ -57,6 +63,16 @@ export type MicroTaskCardProps = {
   timeDraft: string;
   isTimeInvalid: boolean;
   isTimeSaving: boolean;
+  /**
+   * Override for the timer label, used during a time-transfer drag to show
+   * the source's "live preview" minus the dragged minutes. Falls back to the
+   * formatted `seconds` when undefined.
+   */
+  timeLabelOverride?: string;
+  /** Currently the source of an in-flight transfer drag — gets a tinted timer. */
+  isTransferSource?: boolean;
+  /** Currently the hovered drop target during a transfer drag. */
+  isTransferTarget?: boolean;
 };
 
 export function MicroTaskCard({
@@ -73,6 +89,7 @@ export function MicroTaskCard({
   onDelete,
   onArchive,
   onTimeClick,
+  onTimerPointerDown,
   onTimeChange,
   onTimeCommit,
   onTimeCancel,
@@ -90,8 +107,11 @@ export function MicroTaskCard({
   timeDraft,
   isTimeInvalid,
   isTimeSaving,
+  timeLabelOverride,
+  isTransferSource = false,
+  isTransferTarget = false,
 }: MicroTaskCardProps) {
-  const timeLabel = formatDuration(seconds);
+  const timeLabel = timeLabelOverride ?? formatDuration(seconds);
   const [isCategoriesPopoverOpen, setIsCategoriesPopoverOpen] = useState(false);
   const {
     refs: categoryRefs,
@@ -236,10 +256,22 @@ export function MicroTaskCard({
       ) : (
         <button
           type="button"
+          data-time-transfer-source={task.id}
+          onPointerDown={(e) => {
+            // Hand off to the transfer-drag hook. Browsers don't fire a
+            // click after a pointermove > ~5-10px, so a real drag naturally
+            // suppresses click; a tap-and-release without movement still
+            // fires onClick → onTimeClick below.
+            onTimerPointerDown?.(e);
+          }}
           onClick={() => {
             void onTimeClick();
           }}
-          className="w-24 text-center font-mono text-base text-text tabular-nums transition hover:text-white/80"
+          className={clsx(
+            'w-24 rounded-md text-center font-mono text-base tabular-nums transition hover:text-white/80',
+            isTransferSource ? 'text-amber-200' : 'text-text',
+            isTransferTarget && 'bg-emerald-500/10 ring-2 ring-emerald-400/60',
+          )}
           aria-label={`Редактировать время задачи ${task.title}`}
         >
           {timeLabel}

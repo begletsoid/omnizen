@@ -59,6 +59,7 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useDeleteMicroTask: () => deleteMicroTaskMutation,
   useReorderMicroTaskItems: () => ({ mutate: reorderMicroTaskItemsMutation }),
   useToggleMicroTaskTimer: () => ({ mutateAsync: toggleTimerMutation.mutateAsync }),
+  useTransferMicroTaskTime: () => ({ mutateAsync: vi.fn() }),
   useArchiveMicroTask: () => archiveMicroTaskMutation,
   useTaskTags: () => ({ data: mockTags }),
   useTaskCategories: () => ({ data: mockCategories }),

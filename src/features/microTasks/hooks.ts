@@ -32,6 +32,7 @@ import {
   reorderMicroTaskItems,
   setTaskCategoryBuffer,
   startMicroTaskTimer,
+  transferMicroTaskTime,
   updateMicroTask,
   updateMicroTaskGroup,
   updateTaskCategoryAttributes,
@@ -568,6 +569,70 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
       // Goals show aggregate elapsed_seconds across linked micro tasks. Without
       // this invalidation the goal card waits ~10s for the polling refetch
       // before reflecting a paused/started timer.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
+    },
+  });
+}
+
+export type TransferMicroTaskTimeVariables = {
+  fromTaskId: string;
+  toTaskId: string;
+  seconds: number;
+};
+
+/**
+ * Move N seconds from one micro_task to another via the
+ * `transfer_micro_task_time` RPC. Optimistically subtracts/adds on the source
+ * and target rows so the UI reflects the change instantly; rolls back on RPC
+ * error and invalidates on settle so any server-side rebase of running
+ * timers is picked up. The hook keeps both mutate/mutateAsync stable refs so
+ * memoised drag handlers don't lose identity between renders.
+ */
+export function useTransferMicroTaskTime(widgetId: string | null) {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: TransferMicroTaskTimeVariables) => {
+      if (!user) throw new Error('User not authenticated');
+      return transferMicroTaskTime({
+        fromTaskId: vars.fromTaskId,
+        toTaskId: vars.toTaskId,
+        seconds: vars.seconds,
+        userId: user.id,
+      });
+    },
+    onMutate: async ({ fromTaskId, toTaskId, seconds }) => {
+      if (!widgetId) return undefined;
+      await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
+      const previous = queryClient.getQueryData<MicroTaskRecord[]>([
+        'microTasks',
+        widgetId,
+      ]);
+      queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+        old?.map((task) => {
+          if (task.id === fromTaskId) {
+            return {
+              ...task,
+              elapsed_seconds: Math.max(0, task.elapsed_seconds - seconds),
+            };
+          }
+          if (task.id === toTaskId) {
+            return { ...task, elapsed_seconds: task.elapsed_seconds + seconds };
+          }
+          return task;
+        }) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['microTasks', widgetId], context.previous);
+    },
+    onSettled: () => {
+      if (!widgetId) return;
+      queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // Goals aggregate elapsed_seconds across linked tasks — keep them fresh
+      // so the value moved doesn't appear duplicated/missing in the goal card.
       queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
