@@ -200,18 +200,16 @@ export function MicroTasksWidget({
       if (detail?.targetWidgetId !== widgetId) return;
       const goal = detail.goal as { id?: string; title?: string; categories?: Array<{ id: string }> } | undefined;
       if (!goal?.title) return;
-      void (async () => {
-        const newTask = await createTask.mutateAsync({ title: goal.title!, goal_id: goal.id ?? null });
-        if (newTask && goal.categories?.length) {
-          for (const cat of goal.categories) {
-            await attachCategoryToTask.mutateAsync({ taskId: newTask.id, categoryId: cat.id });
-          }
-        }
-      })();
+      const goalCategoryIds = goal.categories?.map((c) => c.id).filter(Boolean) ?? [];
+      void createTask.mutateAsync({
+        title: goal.title!,
+        goal_id: goal.id ?? null,
+        category_ids_override: goalCategoryIds,
+      });
     };
     window.addEventListener('cross-widget-drop', handler);
     return () => window.removeEventListener('cross-widget-drop', handler);
-  }, [widgetId, createTask, attachCategoryToTask]);
+  }, [widgetId, createTask]);
   const updateCategoryColor = useUpdateTaskCategoryColor();
 
   const [optimisticRunningId, setOptimisticRunningId] = useState<string | null>(null);
@@ -1317,6 +1315,18 @@ export function MicroTasksWidget({
         </div>
       )}
 
+
+      {/* Cross-widget drop preview: ghost micro task at the bottom while a goal is dragged over */}
+      {crossDragCtx?.dragGoal && crossDragCtx.hoveredZoneId === widgetId && (
+        <div
+          aria-hidden
+          className="pointer-events-none flex items-center gap-3 rounded-3xl border border-dashed border-accent/60 bg-accent/5 px-4 py-3 text-sm text-text opacity-60"
+        >
+          <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/30 text-[0.65rem]" />
+          <span className="flex-1 truncate">{crossDragCtx.dragGoal.title}</span>
+          <span className="w-20 text-center font-mono text-sm text-muted tabular-nums">00:00:00</span>
+        </div>
+      )}
 
       {/* Add task input */}
       <div className="flex justify-center">

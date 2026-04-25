@@ -20,6 +20,8 @@ import type {
   HabitUpdate,
 } from './types';
 
+const HABITS_REFETCH_INTERVAL_MS = 10_000;
+
 export function useHabits(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
   return useQuery<HabitRecord[], Error>({
@@ -31,6 +33,8 @@ export function useHabits(widgetId: string | null) {
       return data as HabitRecord[];
     },
     enabled,
+    refetchInterval: HABITS_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 

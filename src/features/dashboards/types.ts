@@ -10,7 +10,7 @@ export type DashboardRecord = {
 export type WidgetRecord = {
   id: string;
   dashboard_id: string;
-  type: 'habits' | 'problems' | 'tasks' | 'image' | 'analytics' | 'goals';
+  type: 'habits' | 'problems' | 'tasks' | 'image' | 'analytics' | 'goals' | 'heatmap' | 'ritual' | 'notes-board';
   config: Record<string, unknown>;
   created_at: string;
   updated_at: string;

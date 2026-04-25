@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import {
   FloatingPortal,
   flip,
@@ -43,10 +43,12 @@ export type TaskCardProps = {
   onAttachCategory: (categoryId: string) => Promise<void>;
   onDetachCategory: (categoryId: string) => Promise<void>;
   isArchiving: boolean;
-  onCrossWidgetDragStart?: (e: React.PointerEvent) => void;
+  onDragStart?: (e: React.PointerEvent) => void;
+  registerRef?: (el: HTMLElement | null) => void;
+  isDragging?: boolean;
 };
 
-export function TaskCard({
+function TaskCardImpl({
   goal,
   elapsedSeconds,
   isEditing,
@@ -65,9 +67,18 @@ export function TaskCard({
   onAttachCategory,
   onDetachCategory,
   isArchiving,
-  onCrossWidgetDragStart,
+  onDragStart,
+  registerRef,
+  isDragging,
 }: TaskCardProps) {
   const [isCatOpen, setIsCatOpen] = useState(false);
+
+  const setArticleRef = useCallback(
+    (el: HTMLElement | null) => {
+      registerRef?.(el);
+    },
+    [registerRef],
+  );
   const { refs: catRefs, strategy: catStrategy, x: catX, y: catY } = useFloating({
     open: isCatOpen,
     onOpenChange: setIsCatOpen,
@@ -101,11 +112,13 @@ export function TaskCard({
 
   return (
     <article
-      onPointerDown={onCrossWidgetDragStart}
+      ref={setArticleRef}
+      onPointerDown={onDragStart}
       className={clsx(
-        'group flex items-center gap-3 rounded-3xl px-4 py-3 text-sm text-text touch-none',
+        'group relative flex items-center gap-3 rounded-3xl px-4 py-3 text-sm text-text touch-none transition-opacity',
         goal.is_recurring && !goal.is_done && 'ring-1 ring-rose-500/40',
         colorPreset.cardClass,
+        isDragging && 'opacity-50',
       )}
     >
       <LockIcon locked={goal.is_locked} onToggle={onToggleLock} />
@@ -256,3 +269,15 @@ export function TaskCard({
     </article>
   );
 }
+
+export const TaskCard = memo(TaskCardImpl, (prev, next) => {
+  return (
+    prev.goal === next.goal &&
+    prev.isDragging === next.isDragging &&
+    prev.isEditing === next.isEditing &&
+    prev.editValue === next.editValue &&
+    prev.elapsedSeconds === next.elapsedSeconds &&
+    prev.isArchiving === next.isArchiving &&
+    prev.taskCategories === next.taskCategories
+  );
+});

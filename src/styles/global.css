@@ -11,6 +11,15 @@
 
   html, body {
     height: 100%;
+    /*
+      Clip ALL horizontal overflow at the page boundary. Without this the
+      browser grows its own horizontal scrollbar when a widget is parked past
+      the viewport, and the dashboard's inner overflow-x-auto wrapper never
+      activates — its content can't be "wider than the wrapper" because the
+      wrapper just grows along with the page. Confining horizontal scroll to
+      the inner wrapper is the whole point of the board scroller.
+    */
+    overflow-x: hidden;
   }
 
   body {

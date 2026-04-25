@@ -6,9 +6,11 @@ import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { AuthButton } from '../components/AuthButton';
+import { SettingsModal } from '../components/SettingsModal';
 import { useBootstrapDashboard } from '../features/dashboards/hooks';
 import type { WidgetRecord } from '../features/dashboards/types';
 import { updateWidgetConfig } from '../features/dashboards/api';
+import { useSyncProfileTimezone } from '../features/profile/hooks';
 import type { LayoutItem } from '../features/layout/types';
 import { useDashboardLayout } from '../features/layout/hooks';
 import {
@@ -20,7 +22,10 @@ import {
 import { useAuthStore } from '../stores/authStore';
 import { AnalyticsWidget } from './analytics/AnalyticsWidget';
 import { HabitsWidget } from './habits/HabitsWidget';
+import { HeatmapWidget } from './heatmap/HeatmapWidget';
 import { MicroTasksWidget } from './microTasks/MicroTasksWidget';
+import { NotesBoardWidget } from './notesBoard/NotesBoardWidget';
+import { RitualWidget } from './ritual/RitualWidget';
 import { TasksWidget } from './tasks/TasksWidget';
 import { CrossWidgetDragProvider } from './tasks/CrossWidgetDragContext';
 
@@ -63,19 +68,35 @@ const widgetMeta: Record<
     description: 'Загрузка изображений, перемещение и изменение размеров.',
     accent: 'pink',
   },
+  heatmap: {
+    title: 'Хитмапа',
+    description: 'Ежедневная активность по целям: ценность и время.',
+    accent: 'green',
+  },
+  ritual: {
+    title: 'Ритуал',
+    description: 'Ежедневный протокол вопросов-напоминаний с шкалами и прогрессом.',
+    accent: 'cyan',
+  },
+  'notes-board': {
+    title: 'Доска напоминаний',
+    description: 'Свободный пинборд заметок с перетаскиванием и мультиселектом.',
+    accent: 'pink',
+  },
 };
 
 export function DashboardShell() {
   const user = useAuthStore((state) => state.user);
   const userId = user?.id ?? null;
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  useSyncProfileTimezone(userId);
   const {
     data: bootstrap,
-    isLoading: isDashboardLoading,
     isError,
     error,
   } = useBootstrapDashboard(userId);
   const dashboardId = bootstrap?.dashboard.id ?? null;
-  const { data: layoutRecord, saveLayout, isSaving } = useDashboardLayout(dashboardId);
+  const { data: layoutRecord, saveLayout } = useDashboardLayout(dashboardId);
   const [localLayout, setLocalLayout] = useState<LayoutItem[]>([]);
   const layoutFromBootstrap = bootstrap?.layout.layout ?? [];
   const remoteLayout = layoutRecord?.layout ?? layoutFromBootstrap;
@@ -111,8 +132,22 @@ export function DashboardShell() {
     (widget: WidgetRecord | undefined, patch: Record<string, unknown>) => {
       if (!widget || !userId || !dashboardId) return;
       const widgetId = widget.id;
-      const nextConfig = { ...(widget.config ?? {}), ...patch };
-      const optimistic: WidgetRecord = { ...widget, config: nextConfig };
+
+      // Read the latest widget from React Query's cache rather than the closure
+      // snapshot: two patches fired back-to-back in the same render (e.g. a
+      // widget that saves `{ sets }` then `{ state }`) would otherwise both see
+      // the same stale `widget.config` and the second call would overwrite the
+      // first. Falling back to the captured `widget` keeps the first-load path
+      // working before the cache is primed.
+      const cachedWidgets = queryClient.getQueryData<WidgetRecord[]>(['widgets', dashboardId]);
+      const cachedBootstrap = queryClient.getQueryData<typeof bootstrap>(['dashboard', userId]);
+      const latestWidget =
+        cachedWidgets?.find((entry) => entry.id === widgetId) ??
+        cachedBootstrap?.widgets.find((entry) => entry.id === widgetId) ??
+        widget;
+
+      const nextConfig = { ...(latestWidget.config ?? {}), ...patch };
+      const optimistic: WidgetRecord = { ...latestWidget, config: nextConfig };
 
       queryClient.setQueryData(['dashboard', userId], (prev: typeof bootstrap | undefined) => {
         if (!prev) return prev;
@@ -147,15 +182,21 @@ export function DashboardShell() {
   );
   const canDrag = Boolean(userId && dashboardId);
   const boardRef = useRef<HTMLDivElement>(null);
+  // Observe the OUTER scroller (fixed to viewport width) rather than boardRef,
+  // which grows with `minWidth: boardMinWidthPx`. Observing the growing board
+  // creates a feedback loop: bigger board → bigger columnWidth → bigger
+  // boardMinWidthPx → bigger board → ∞. After dragging a widget past the
+  // viewport the whole page appeared to "clip from both sides" because the
+  // board kept inflating on every resize callback.
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const [columnWidth, setColumnWidth] = useState<number>(120);
 
   useEffect(() => {
-    if (!boardRef.current) return;
-    const element = boardRef.current;
+    if (!scrollerRef.current) return;
+    const element = scrollerRef.current;
     const observer = new ResizeObserver(([entry]) => {
       const width = entry.contentRect.width;
-      const available =
-        width - GRID_GAP_PX * Math.max(0, Math.min(GRID_COLUMNS - 1, GRID_COLUMNS - 1));
+      const available = width - GRID_GAP_PX * Math.max(0, GRID_COLUMNS - 1);
       const nextWidth =
         GRID_COLUMNS > 0 ? Math.max(MIN_COL_WIDTH, available / GRID_COLUMNS) : MIN_COL_WIDTH;
       setColumnWidth(nextWidth);
@@ -166,6 +207,24 @@ export function DashboardShell() {
 
   const columnStep = columnWidth + GRID_GAP_PX;
   const rowStep = DEFAULT_ROW_HEIGHT_PX + GRID_GAP_PX;
+
+  // Grow the board to fit any widget parked past the original 12-column grid.
+  // Without this, setting left:1500px on an absolute child wouldn't expand the
+  // relative parent, so horizontal scroll wouldn't reveal those widgets.
+  const maxRightUnits = layoutItems.reduce(
+    (max, item) => Math.max(max, (item.x ?? 0) + (item.w ?? 4)),
+    GRID_COLUMNS,
+  );
+  const boardMinWidthPx = Math.round(maxRightUnits * columnStep);
+  // Same idea for the vertical axis — widgets are absolute-positioned so the
+  // board doesn't naturally grow to fit them. Without this, dragging a widget
+  // past the initial min-h-[30rem] leaves the page with empty black space
+  // above the fold (the main element collapses around the board).
+  const maxBottomUnits = layoutItems.reduce(
+    (max, item) => Math.max(max, (item.y ?? 0) + (item.h ?? 3)),
+    2,
+  );
+  const boardMinHeightPx = Math.round(maxBottomUnits * rowStep);
 
   const handleDragEnd = (event: DragEndEvent) => {
     if (!canDrag) return;
@@ -197,63 +256,89 @@ export function DashboardShell() {
 
   return (
     <CrossWidgetDragProvider>
-    <div className="min-h-screen bg-background text-text">
-      <header className="flex flex-col gap-5 px-6 pb-8 pt-10 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-sm uppercase tracking-[0.3rem] text-muted">omnizen</p>
-          <h1 className="text-3xl font-semibold">
-            {bootstrap?.dashboard.title ?? 'Персональный дашборд'}
-          </h1>
-          <p className="text-sm text-muted">
-            Вход через Google, данные хранятся в Supabase. Дальше здесь появится drag-and-drop сетка
-            с живыми виджетами.
-          </p>
-          {isDashboardLoading && user ? (
-            <p className="text-xs text-muted">Загружаем ваши виджеты…</p>
-          ) : null}
-          {isError ? (
-            <p className="text-xs text-red-400">
-              Не удалось загрузить дашборд: {error?.message ?? 'неизвестная ошибка'}
+    {/*
+      `max-w-screen + overflow-x-hidden` on the root keeps the page itself from
+      widening when a widget is parked past the viewport. Otherwise <main>
+      grows with its absolute-positioned children, the browser gives the whole
+      page a horizontal scrollbar, and the inner overflow-x-auto wrapper never
+      gets a chance to activate — so the off-screen widgets become unreachable
+      except by scrolling the page from both edges.
+    */}
+    <div className="min-h-screen max-w-full overflow-x-hidden bg-background text-text">
+      <header className="flex items-center justify-between gap-4 px-6 pb-3 pt-2">
+        <p className="text-sm uppercase tracking-[0.3rem] text-muted">omnizen</p>
+        <div className="flex items-center gap-3">
+          <div className="text-right text-xs uppercase tracking-widest text-muted">
+            <p className="text-[0.65rem]">Пользователь</p>
+            <p className="text-base font-semibold normal-case tracking-normal text-text">
+              {userLabel}
             </p>
-          ) : null}
-        </div>
-        <div className="flex flex-col items-start gap-4 text-sm text-muted sm:items-end">
-          <div className="flex gap-4">
-            <div className="text-left sm:text-right">
-              <p className="font-semibold text-text">Netlify</p>
-              <p>CI / CD готов</p>
-            </div>
-            <div className="text-left sm:text-right">
-              <p className="font-semibold text-text">Supabase</p>
-              <p>Schema snapshot подтянут</p>
-            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-left text-xs uppercase tracking-widest text-muted sm:text-right">
-              <p className="text-[0.65rem]">Пользователь</p>
-              <p className="text-base font-semibold normal-case tracking-normal text-text">
-                {userLabel}
-              </p>
-            </div>
-            <AuthButton />
-          </div>
-          {canDrag && (
-            <p className="text-xs text-muted">
-              Перетаскивание виджетов {isSaving ? '— сохраняем изменения…' : 'доступно'}
-            </p>
+          {userId && (
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              aria-label="Настройки"
+              title="Настройки"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/30 text-muted transition hover:border-accent hover:text-accent"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-5 w-5"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
           )}
+          <AuthButton />
         </div>
       </header>
+      {isSettingsOpen && (
+        <SettingsModal userId={userId} onClose={() => setIsSettingsOpen(false)} />
+      )}
+      {isError && (
+        <p className="px-6 pb-2 text-xs text-red-400">
+          Не удалось загрузить дашборд: {error?.message ?? 'неизвестная ошибка'}
+        </p>
+      )}
 
       <main className="px-6 pb-16">
         {!layoutReady && (
-          <section className="glass-panel border border-border/50 bg-surface/60 px-6 py-10 text-center text-sm text-muted">
-            {isDashboardLoading ? 'Загружаем виджеты...' : 'Виджеты ещё не готовы.'}
+          <section
+            data-testid="dashboard-empty-state"
+            className="glass-panel border border-border/50 bg-surface/60 px-6 py-10 text-center text-sm text-muted"
+          >
+            {!userId
+              ? 'Войдите через Google, чтобы увидеть ваш дашборд.'
+              : 'Загружаем виджеты…'}
           </section>
         )}
         {layoutReady && (
           <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-            <div ref={boardRef} className="relative min-h-[30rem]">
+            {/*
+              Horizontal scroll is scoped to this inner div, not <main>. CSS
+              spec forces overflow-y:auto whenever overflow-x is auto, so
+              putting it on <main> clipped vertical content and left a black
+              band at the bottom of the page. This wrapper itself is
+              constrained to viewport width (its ancestor has overflow-x-hidden),
+              so board-minWidth beyond viewport activates the scrollbar here.
+            */}
+            <div ref={scrollerRef} className="overflow-x-auto overscroll-x-contain">
+              <div
+                ref={boardRef}
+                className="relative"
+                style={{
+                  minWidth: `${boardMinWidthPx}px`,
+                  minHeight: `${Math.max(boardMinHeightPx, 480)}px`,
+                }}
+              >
               {layoutItems.map((item) => {
                 const widget = widgetsById.get(item.widget_id);
                 const meta = widgetMeta[item.type];
@@ -304,6 +389,36 @@ export function DashboardShell() {
                       }
                     />
                   );
+                } else if (item.type === 'heatmap') {
+                  content = (
+                    <HeatmapWidget
+                      widgetId={item.widget_id}
+                      config={widget?.config ?? null}
+                      onUpdateConfig={
+                        widget ? (patch) => handleWidgetConfigPatch(widget, patch) : undefined
+                      }
+                    />
+                  );
+                } else if (item.type === 'ritual') {
+                  content = (
+                    <RitualWidget
+                      widgetId={item.widget_id}
+                      config={widget?.config ?? null}
+                      onUpdateConfig={
+                        widget ? (patch) => handleWidgetConfigPatch(widget, patch) : undefined
+                      }
+                    />
+                  );
+                } else if (item.type === 'notes-board') {
+                  content = (
+                    <NotesBoardWidget
+                      widgetId={item.widget_id}
+                      config={widget?.config ?? null}
+                      onUpdateConfig={
+                        widget ? (patch) => handleWidgetConfigPatch(widget, patch) : undefined
+                      }
+                    />
+                  );
                 } else {
                   content = (
                     <div className="h-full">
@@ -324,6 +439,7 @@ export function DashboardShell() {
                   </DraggableWidget>
                 );
               })}
+              </div>
             </div>
             {!canDrag && (
               <p className="mt-4 text-center text-xs text-muted">
@@ -383,13 +499,13 @@ function DraggableWidget({
       aria-label={title}
       ref={setNodeRef}
       style={style}
-      className="absolute flex select-none flex-col rounded-3xl bg-surface/90 p-4 shadow-card backdrop-blur transition-shadow"
+      className="absolute flex select-none flex-col gap-1"
     >
       <div className="flex items-center justify-end">
         <button
           type="button"
           ref={setActivatorNodeRef}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-full bg-white/10 text-sm text-muted ring-1 ring-white/20 transition hover:text-text disabled:opacity-50"
+          className="flex h-6 w-6 items-center justify-center rounded-full bg-white/10 text-xs text-muted ring-1 ring-white/20 transition hover:text-text disabled:opacity-50"
           aria-label="Переместить виджет"
           disabled={dragDisabled}
           {...listeners}

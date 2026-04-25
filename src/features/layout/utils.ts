@@ -11,6 +11,9 @@ export function clampGridPosition(
 ): { x: number; y: number } {
   const snap = 1 / GRID_SUBDIVISIONS;
   const roundToSubgrid = (value: number) => Math.round(value / snap) * snap;
+  // No right clamp: user should be able to park a widget past the initial
+  // viewport and have the board grow horizontally (infinite board). Only the
+  // left/top edges are clamped at 0.
   return {
     x: Math.max(0, roundToSubgrid(candidate.x)),
     y: Math.max(0, roundToSubgrid(candidate.y)),

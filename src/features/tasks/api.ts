@@ -1,5 +1,5 @@
 import { supabase } from '../../lib/supabaseClient';
-import type { GoalInsert, GoalUpdate, RecurringGoalInsert } from './types';
+import type { GoalInsert, GoalOrderUpdatePayload, GoalUpdate, RecurringGoalInsert } from './types';
 
 let supabaseClient = supabase;
 
@@ -23,12 +23,41 @@ export async function listGoals(widgetId: string) {
     .select('*, categories:goal_category_links(category:task_categories(*))')
     .eq('widget_id', widgetId)
     .is('archived_at', null)
-    .order('created_at', { ascending: true });
+    .order('sort_order', { ascending: true });
+}
+
+export async function fetchMinGoalSortOrder(widgetId: string): Promise<number> {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('goals')
+    .select('sort_order')
+    .eq('widget_id', widgetId)
+    .is('archived_at', null)
+    .order('sort_order', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return typeof data?.sort_order === 'number' ? data.sort_order : 1;
 }
 
 export async function createGoal(data: GoalInsert) {
   const client = requireSupabase();
   return client.from('goals').insert(data).select('*').single();
+}
+
+export async function reorderGoals(params: {
+  widgetId: string;
+  userId: string;
+  updates: GoalOrderUpdatePayload[];
+}) {
+  const client = requireSupabase();
+  if (!params.updates.length) return;
+  const { error } = await client.rpc('reorder_goals', {
+    p_widget_id: params.widgetId,
+    p_user_id: params.userId,
+    p_updates: params.updates,
+  });
+  if (error) throw error;
 }
 
 export async function updateGoal(id: string, data: GoalUpdate) {

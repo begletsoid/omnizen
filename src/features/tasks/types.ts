@@ -10,12 +10,15 @@ export type GoalRecord = {
   is_recurring: boolean;
   value: number;
   expected_hours: number;
+  sort_order: number;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
   categories?: TaskCategory[];
   elapsed_seconds?: number;
 };
+
+export type GoalOrderUpdatePayload = { id: string };
 
 export type GoalInsert = {
   title: string;
@@ -26,6 +29,7 @@ export type GoalInsert = {
   is_recurring?: boolean;
   value?: number;
   expected_hours?: number;
+  sort_order?: number;
   archived_at?: string | null;
 };
 

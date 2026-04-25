@@ -47,6 +47,24 @@ describe('DashboardShell', () => {
     expect(screen.getByRole('button', { name: /войти через google/i })).toBeInTheDocument();
   });
 
+  it('когда не авторизован — показывает понятный призыв войти, а не "виджеты не готовы"', () => {
+    renderWithProviders();
+
+    const empty = screen.getByTestId('dashboard-empty-state');
+    expect(empty.textContent).toMatch(/войдите через google/i);
+    expect(empty.textContent).not.toMatch(/виджеты ещё не готовы/i);
+  });
+
+  it('когда авторизован, но виджеты ещё грузятся — показывает индикатор загрузки', () => {
+    useAuthStore.setState({ user: mockUser(), session: null });
+
+    renderWithProviders();
+
+    const empty = screen.getByTestId('dashboard-empty-state');
+    expect(empty.textContent).toMatch(/загружаем/i);
+    expect(empty.textContent).not.toMatch(/войдите через google/i);
+  });
+
   it('показывает кнопку выхода, если пользователь авторизован', () => {
     useAuthStore.setState({
       user: mockUser(),

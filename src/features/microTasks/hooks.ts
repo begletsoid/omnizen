@@ -51,10 +51,14 @@ import type {
 } from './types';
 import { normalizeTimerState } from './utils';
 
+const DATA_REFETCH_INTERVAL_MS = 10_000;
+
 export function useMicroTasks(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
   return useQuery<MicroTaskRecord[], Error>({
     queryKey: ['microTasks', widgetId],
+    refetchInterval: DATA_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
       if (!widgetId) throw new Error('Widget id is required');
       const { data, error } = await getMicroTasks(widgetId);
@@ -113,6 +117,8 @@ export function useMicroTaskGroups(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
   return useQuery<MicroTaskGroup[], Error>({
     queryKey: ['microTaskGroups', widgetId],
+    refetchInterval: DATA_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
       if (!widgetId) throw new Error('Widget id is required');
       const { data, error } = await getMicroTaskGroups(widgetId);
@@ -221,26 +227,39 @@ export function useDeleteMicroTaskGroup(widgetId: string | null) {
   });
 }
 
+type CreateMicroTaskPayload = Omit<MicroTaskInsert, 'widget_id' | 'user_id' | 'order'> & {
+  /**
+   * When provided, these category IDs are attached to the new task instead of the
+   * user's task category buffer. Use an empty array to attach no categories.
+   * Typical use case: dragging a goal into the micro tasks widget — we want the
+   * new task to inherit only the goal's categories, not the buffer.
+   */
+  category_ids_override?: string[];
+};
+
 export function useCreateMicroTask(widgetId: string | null) {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
   const { data: bufferedCategoryIds } = useTaskCategoryBuffer(user?.id ?? null);
 
   return useMutation({
-    mutationFn: async (payload: Omit<MicroTaskInsert, 'widget_id' | 'user_id' | 'order'>) => {
+    mutationFn: async (payload: CreateMicroTaskPayload) => {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
+      const { category_ids_override, ...insertData } = payload;
       const order = await fetchNextMicroTaskOrder(widgetId);
       const { data, error } = await createMicroTask({
         widget_id: widgetId,
         user_id: user.id,
         order,
-        ...payload,
+        ...insertData,
       });
       if (error) throw error;
 
-      if (bufferedCategoryIds && bufferedCategoryIds.length > 0) {
-        await attachCategoriesToTask(data.id, bufferedCategoryIds, user.id);
+      const categoriesToAttach =
+        category_ids_override !== undefined ? category_ids_override : (bufferedCategoryIds ?? []);
+      if (categoriesToAttach.length > 0) {
+        await attachCategoriesToTask(data.id, categoriesToAttach, user.id);
       }
 
       return data as MicroTaskRecord;
