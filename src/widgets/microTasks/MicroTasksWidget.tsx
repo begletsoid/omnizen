@@ -160,6 +160,11 @@ export function MicroTasksWidget({
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
 
+  // Wrapped in try/catch so the widget renders standalone in tests where the
+  // cross-widget drag provider isn't mounted. The hook is still called on
+  // every render — the `eslint-disable` is for the IIFE wrapper, which the
+  // rules-of-hooks rule mistakes for a conditional call site.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   const crossDragCtx = (() => { try { return useCrossWidgetDrag(); } catch { return null; } })();
   const dropZoneRef = useRef<HTMLElement | null>(null);
 

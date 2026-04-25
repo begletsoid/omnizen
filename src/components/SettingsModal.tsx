@@ -91,11 +91,11 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
         </section>
 
         <section className="mb-4">
-          <h3 className="mb-2 text-xs uppercase tracking-widest text-muted">Автоочистка в 04:30</h3>
+          <h3 className="mb-2 text-xs uppercase tracking-widest text-muted">Автоочистка после пробуждения</h3>
           <p className="text-xs text-muted">
-            Каждое утро в 04:30 по локальному времени сервер автоматически ставит на паузу
-            последний запущенный таймер (отсекая время после того, как ты лёг), архивирует все
-            задачи с &gt;5 сек на таймере и удаляет пустышки.
+            Когда iPhone присылает время отбоя (через iOS Shortcut при пробуждении),
+            сервер сразу ставит на паузу последний запущенный таймер (отсекая время после
+            того, как ты лёг), архивирует все задачи с &gt;5 сек на таймере и удаляет пустышки.
           </p>
           <p className="mt-2 text-xs text-muted">
             Момент «когда ты лёг» читается из Apple Watch через iOS-команду (ниже).
@@ -169,9 +169,10 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
             </summary>
 
             <p className="mt-2">
-              Ключевой момент: сам образец сна в Shortcuts показывает только категорию («Core»,
-              «Deep» и т.п.). Чтобы достать время, когда ты лёг, нужен второй action —
-              «Получить подробные сведения», откуда мы забираем <em>Start Date</em>.
+              iPhone отдаёт сырые семплы шагов за последние сутки, сервер сам находит самый
+              длинный период бездействия и считает его время начала за момент отбоя. Такой
+              подход устойчив к ночным походам в туалет (1-2 коротких всплеска шагов
+              внутри ночи алгоритм поглощает) и не зависит от Sleep Focus.
             </p>
 
             <ol className="ml-5 mt-3 list-decimal space-y-2">
@@ -182,38 +183,54 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
               <li>
                 Добавь action <b>«Найти образцы Здоровья»</b> (Find Health Samples):
                 <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Тип: <code>Sleep</code> (Сон).</li>
+                  <li>Тип: <code>Steps</code> (Шаги).</li>
+                  <li>Фильтр: <code>Start Date · в последн. · 1 · день</code>.</li>
+                  <li>Сортировка: <code>Start Date</code>, по возрастанию.</li>
                   <li>
-                    Фильтр (нажми «Добавить фильтр»): <code>Start Date · в течение · Последние 12 часов</code>.
-                    Это отсечёт вчерашний дневной сон, оставит только ночь.
+                    Лимит: <b>отключи</b> переключатель «Ограничение». Серверу нужны все
+                    семплы за день — обычно их 30-100 штук.
                   </li>
-                  <li>
-                    Сортировка: <code>Start Date</code>, <b>по возрастанию</b> (Ascending).
-                    Самый ранний семпл сегодняшней ночи ≈ когда ты лёг.
-                  </li>
-                  <li>Предел: <code>1</code>.</li>
                 </ul>
               </li>
               <li>
-                Добавь action <b>«Получить подробные сведения»</b> (Get Details of Health Samples):
+                Добавь action <b>«Повторить с каждым»</b> (Repeat with Each), вход —
+                результат предыдущего шага. Внутри цикла:
                 <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Источник: переменная из предыдущего шага (автоподставится).</li>
-                  <li>Свойство: <code>Start Date</code> (Дата начала).</li>
+                  <li>
+                    <b>Получить подробные сведения о Здоровье</b>: свойство <code>Start Date</code>.
+                    Затем <b>Форматировать дату</b> с заказным форматом{' '}
+                    <code>yyyy-MM-dd&apos;T&apos;HH:mm:ssXXX</code> → переменная-результат A.
+                  </li>
+                  <li>
+                    Ещё <b>Получить подробные сведения</b>: свойство <code>End Date</code>{' '}
+                    + <b>Форматировать дату</b> тем же форматом → переменная-результат B.
+                  </li>
+                  <li>
+                    Ещё <b>Получить подробные сведения</b>: свойство{' '}
+                    <code>Quantity</code> (количество шагов) → переменная-результат C.
+                  </li>
+                  <li>
+                    Action <b>«Словарь»</b>: создай объект с тремя ключами{' '}
+                    <code>start</code> = A, <code>end</code> = B, <code>value</code> = C.
+                  </li>
                 </ul>
-                На выходе — ISO-дата типа <code>2026-04-23 01:17:03</code>.
+                После цикла переменная «Результат повторения» — это массив словарей.
               </li>
               <li>
-                Добавь action <b>«Получить содержимое URL»</b>:
+                Action <b>«Словарь»</b> (вне цикла): создай <code>{'{ step_samples: <Результат повторения> }'}</code>.
+              </li>
+              <li>
+                Action <b>«Получить содержимое URL»</b>:
                 <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
                   <li>URL: тот, что в этом окне выше.</li>
                   <li>Метод: <code>POST</code>.</li>
                   <li>
                     Заголовки: <code>Content-Type: application/json</code> и{' '}
-                    <code>Authorization: Bearer {token || '&lt;твой-токен&gt;'}</code>.
+                    <code>Authorization: Bearer {token || '<твой-токен>'}</code>.
                   </li>
                   <li>
-                    Тело запроса: <code>Словарь (JSON)</code> с одним ключом <code>bedtime_at</code>,
-                    значение — «Детали образцов Здоровья» из шага 3 (просто вставь переменную).
+                    Тело запроса: <b>Файл</b> → выбрать словарь из шага 4 (или
+                    Body type «JSON» → передать тот словарь).
                   </li>
                 </ul>
               </li>

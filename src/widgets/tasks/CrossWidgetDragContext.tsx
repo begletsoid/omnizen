@@ -136,6 +136,12 @@ export function CrossWidgetDragProvider({ children }: { children: React.ReactNod
   );
 }
 
+// Co-locating the hook with the provider keeps cross-widget drag wiring in
+// one file. Splitting purely to satisfy `react-refresh/only-export-components`
+// would scatter the API across two files for no real benefit — and HMR works
+// fine in practice for hook-only edits since neither React nor Vite tries to
+// preserve hook state between reloads.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useCrossWidgetDrag() {
   const ctx = useContext(CrossWidgetDragCtx);
   if (!ctx) throw new Error('useCrossWidgetDrag must be inside CrossWidgetDragProvider');

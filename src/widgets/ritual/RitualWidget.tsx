@@ -269,7 +269,6 @@ export function RitualWidget({ config, onUpdateConfig }: RitualWidgetProps) {
 
   useEffect(() => {
     if (draggingSetIdRef.current) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalSets(sets);
   }, [sets]);
 
@@ -582,7 +581,6 @@ function SetTab({
   const [draft, setDraft] = useState(set.name);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!editing) setDraft(set.name);
   }, [editing, set.name]);
 
@@ -854,7 +852,6 @@ function EditView({
 
   useEffect(() => {
     if (draggingIdRef.current) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalSteps(steps);
   }, [steps]);
 

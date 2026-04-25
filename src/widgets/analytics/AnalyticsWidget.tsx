@@ -622,7 +622,6 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   useEffect(() => {
     if (!filterTimerId) return;
     if (!filteredTimers.some((timer) => timer.id === filterTimerId)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFilterTimerId(null);
     }
   }, [filterTimerId, filteredTimers]);

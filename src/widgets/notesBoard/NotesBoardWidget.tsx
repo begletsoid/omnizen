@@ -57,7 +57,6 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
   useEffect(() => {
     if (serverSignature !== localSignature.current) {
       localSignature.current = serverSignature;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setNotes(serverNotes);
     }
   }, [serverSignature, serverNotes]);

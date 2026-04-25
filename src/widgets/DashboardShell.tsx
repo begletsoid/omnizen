@@ -107,7 +107,6 @@ export function DashboardShell() {
 
   useEffect(() => {
     if (!remoteLayout.length) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocalLayout(remoteLayout.map((item) => ({ ...item })));
   }, [layoutSignature, remoteLayout]);
 
