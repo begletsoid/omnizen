@@ -565,6 +565,10 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
     onSettled: () => {
       if (!widgetId) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // Goals show aggregate elapsed_seconds across linked micro tasks. Without
+      // this invalidation the goal card waits ~10s for the polling refetch
+      // before reflecting a paused/started timer.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
 }
