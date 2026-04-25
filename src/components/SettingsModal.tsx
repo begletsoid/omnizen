@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
   useEnsureSleepToken,
@@ -27,10 +27,10 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
     }
   }, [userId, profile, ensureToken]);
 
-  const webhookUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    return `${window.location.origin}/api/sleep-webhook`;
-  }, []);
+  // Hardcoded prod URL: the iOS Shortcut runs on a phone, which can't reach
+  // localhost. Even when the user has the dashboard open in dev mode the
+  // webhook they need to put in Shortcuts is the public Netlify Function.
+  const webhookUrl = 'https://omnizen.netlify.app/api/sleep-webhook';
   const token = profile?.sleep_webhook_token ?? '';
   const tz = profile?.timezone ?? 'UTC';
   const lastBedtime = profile?.last_bedtime_at ?? null;
