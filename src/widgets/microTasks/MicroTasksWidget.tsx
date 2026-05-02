@@ -79,6 +79,7 @@ import { TimeTransferOverlay } from './components/TimeTransferOverlay';
 import { TagIcon } from './components/Icons';
 import { usePointerDnd } from './hooks/usePointerDnd';
 import { useTimeTransferDrag } from './hooks/useTimeTransferDrag';
+import { useDuplicateOnD } from './hooks/useDuplicateOnD';
 import { useCrossWidgetDrag } from '../tasks/CrossWidgetDragContext';
 import { useTimers, describeTimerTags } from './hooks/useTimers';
 import { computeAvailableSecondsOnSource } from '../../features/microTasks/transferUtils';
@@ -352,6 +353,55 @@ export function MicroTasksWidget({
   const transferEffectiveMinutes = transferDrag.effectiveMinutes;
   const transferRequestedMinutes = transferDrag.requestedMinutes;
   const transferValidity = transferDrag.validity;
+
+  // Press D over a task row to duplicate it (title + categories + goal_id).
+  // We track the pointer imperatively because the keydown event itself has no
+  // pointer position — and the alternative (mouseenter/mouseleave on every
+  // row) would flicker each time the user re-renders the list.
+  const lastPointerRef = useRef<{ x: number; y: number }>({ x: -1, y: -1 });
+  useEffect(() => {
+    const handler = (e: PointerEvent) => {
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
+    };
+    window.addEventListener('pointermove', handler);
+    return () => window.removeEventListener('pointermove', handler);
+  }, []);
+
+  const resolveTaskAtPointer = useCallback((): MicroTaskRecord | null => {
+    if (typeof document.elementFromPoint !== 'function') return null;
+    const { x, y } = lastPointerRef.current;
+    if (x < 0 || y < 0) return null;
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (!el) return null;
+    const row = el.closest('[data-task-id]') as HTMLElement | null;
+    if (!row) return null;
+    const id = row.getAttribute('data-task-id');
+    if (!id) return null;
+    return taskById.get(id) ?? null;
+  }, [taskById]);
+
+  const createTaskMutateAsync = createTask.mutateAsync;
+  const handleDuplicateTask = useCallback(
+    (task: MicroTaskRecord) => {
+      const categoryIds = task.categories?.map((c) => c.id) ?? [];
+      // Cast: MicroTaskRecord type doesn't list goal_id, but the runtime row
+      // carries it (added in the tasks-widget migration). Read it loosely.
+      const goalId = (task as MicroTaskRecord & { goal_id?: string | null }).goal_id ?? null;
+      void createTaskMutateAsync({
+        title: task.title,
+        goal_id: goalId,
+        group_id: task.group_id ?? null,
+        category_ids_override: categoryIds,
+      });
+    },
+    [createTaskMutateAsync],
+  );
+
+  useDuplicateOnD({
+    enabled: Boolean(widgetId),
+    resolveTaskAtPointer,
+    onDuplicate: handleDuplicateTask,
+  });
 
   const timerSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
