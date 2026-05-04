@@ -11,8 +11,12 @@ type UseDuplicateOnDParams = {
    * needed, the user just pressed D outside any row.
    */
   resolveTaskAtPointer: () => MicroTaskRecord | null;
-  /** Fire-and-forget; the parent owns the actual mutation. */
-  onDuplicate: (task: MicroTaskRecord) => void;
+  /**
+   * Fire-and-forget; the parent owns the actual mutation. Returning a
+   * promise is fine — the hook doesn't wait on it (we want the keypress to
+   * feel instant; if the mutation throws the parent's onError handles it).
+   */
+  onDuplicate: (task: MicroTaskRecord) => void | Promise<unknown>;
 };
 
 /** Detect "D" (latin) or "В" (Cyrillic on the same physical key on RU layout). */

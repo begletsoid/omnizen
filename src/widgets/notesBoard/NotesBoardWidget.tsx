@@ -206,7 +206,14 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
         window.removeEventListener('keydown', handleKey);
         setDragState({ draggedId: null, hasDelta: false });
         if (hasMoved) {
-          persist(notesRef.current);
+          // Read latest state via functional setter — `notesRef.current` can
+          // be one render behind (its useEffect hasn't run yet between the
+          // last setNotes during pointermove and this pointerup), and that
+          // stale snapshot would persist back over recently-resized widths.
+          setNotes((prev) => {
+            persist(prev);
+            return prev;
+          });
         }
       };
       const handleKey = (ev: KeyboardEvent) => {
@@ -250,7 +257,11 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
       const handleUp = () => {
         window.removeEventListener('pointermove', handleMove);
         window.removeEventListener('pointerup', handleUp);
-        persist(notesRef.current);
+        // Same race as drag-end above: read latest via functional setter.
+        setNotes((prev) => {
+          persist(prev);
+          return prev;
+        });
       };
       window.addEventListener('pointermove', handleMove);
       window.addEventListener('pointerup', handleUp);
@@ -268,24 +279,30 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
       y = snapToGrid(viewport.scrollTop + 24);
     }
     const note: Note = { id: nanoid(), html: '', x, y };
-    const next = [...notes, note];
-    setNotes(next);
-    persist(next);
+    setNotes((prev) => {
+      const next = [...prev, note];
+      // Persist `next` derived from the freshest local state so a brand-new
+      // note doesn't clobber pending widths from a resize that hasn't yet
+      // round-tripped through the closure.
+      persist(next);
+      return next;
+    });
     setSelected(new Set([note.id]));
     setEditingId(note.id);
-  }, [notes, persist]);
+  }, [persist]);
 
   const commitNoteText = useCallback(
     (id: string, html: string) => {
       const trimmed = html.trim();
-      // Use ref so we work with the latest notes even if an outer event already
-      // triggered a partial update in the same tick.
-      const current = notesRef.current;
-      const next = trimmed
-        ? current.map((n) => (n.id === id ? { ...n, html: trimmed } : n))
-        : current.filter((n) => n.id !== id);
-      setNotes(next);
-      persist(next);
+      // Functional setNotes so we never overwrite a sibling note's width
+      // that was set after this commit's caller captured its closure.
+      setNotes((prev) => {
+        const next = trimmed
+          ? prev.map((n) => (n.id === id ? { ...n, html: trimmed } : n))
+          : prev.filter((n) => n.id !== id);
+        persist(next);
+        return next;
+      });
       if (!trimmed) {
         setSelected((prev) => {
           const copy = new Set(prev);
@@ -299,9 +316,13 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
 
   const removeSelected = useCallback(() => {
     if (selectedRef.current.size === 0) return;
-    const next = notesRef.current.filter((n) => !selectedRef.current.has(n.id));
-    setNotes(next);
-    persist(next);
+    // Same race as the other persist sites — use the functional setter so we
+    // read the freshest array instead of a possibly-stale notesRef.current.
+    setNotes((prev) => {
+      const next = prev.filter((n) => !selectedRef.current.has(n.id));
+      persist(next);
+      return next;
+    });
     setSelected(new Set());
   }, [persist]);
 
@@ -386,7 +407,11 @@ export function NotesBoardWidget({ config, onUpdateConfig }: NotesBoardWidgetPro
       {!collapsed && (
         <div
           ref={viewportRef}
-          className="relative flex-1 overflow-auto overscroll-contain rounded-2xl border border-white/5 bg-black/30"
+          // No overscroll-contain: when the user mouse-wheels over the notes
+          // board they expect the page to keep scrolling once the inner
+          // canvas reaches its edges (or immediately, when the canvas fits
+          // inside the viewport entirely). The default `auto` chain does that.
+          className="relative flex-1 overflow-auto rounded-2xl border border-white/5 bg-black/30"
         >
           <div
             ref={canvasRef}

@@ -381,20 +381,29 @@ export function MicroTasksWidget({
   }, [taskById]);
 
   const createTaskMutateAsync = createTask.mutateAsync;
+  const toggleTimerMutateAsync = toggleTimer.mutateAsync;
   const handleDuplicateTask = useCallback(
-    (task: MicroTaskRecord) => {
+    async (task: MicroTaskRecord) => {
       const categoryIds = task.categories?.map((c) => c.id) ?? [];
       // Cast: MicroTaskRecord type doesn't list goal_id, but the runtime row
       // carries it (added in the tasks-widget migration). Read it loosely.
       const goalId = (task as MicroTaskRecord & { goal_id?: string | null }).goal_id ?? null;
-      void createTaskMutateAsync({
+      const created = await createTaskMutateAsync({
         title: task.title,
         goal_id: goalId,
         group_id: task.group_id ?? null,
         category_ids_override: categoryIds,
       });
+      // Auto-start the duplicate's timer. start_micro_task_timer pauses any
+      // other running task in the widget atomically, so the previously active
+      // task gets paused without a separate call.
+      try {
+        await toggleTimerMutateAsync({ id: created.id, isRunning: false });
+      } catch {
+        // Non-fatal: duplicate row exists; user can press the play button.
+      }
     },
-    [createTaskMutateAsync],
+    [createTaskMutateAsync, toggleTimerMutateAsync],
   );
 
   useDuplicateOnD({

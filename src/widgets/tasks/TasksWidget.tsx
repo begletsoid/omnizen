@@ -13,6 +13,8 @@ import {
   useReorderGoals,
 } from '../../features/tasks/hooks';
 import { useTaskCategories } from '../../features/microTasks/hooks';
+import { useBootstrapDashboard } from '../../features/dashboards/hooks';
+import { useAuthStore } from '../../stores/authStore';
 import { placeCompletedGoalOrder, sortGoals } from '../../features/tasks/utils';
 import { findPendingTriggers } from '../../features/tasks/cronUtils';
 import type { GoalRecord } from '../../features/tasks/types';
@@ -50,6 +52,16 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
   const updateRecurringGoal = useUpdateRecurringGoal(widgetId);
   const cronCheckedRef = useRef(false);
 
+  // Need the user's micro-tasks widget id to mirror the cron-fired goal as a
+  // micro-task. Listen to the same dashboard bootstrap that DashboardShell
+  // uses so we hit the same React Query cache (no extra network call).
+  const userId = useAuthStore((s) => s.user?.id) ?? null;
+  const { data: bootstrap } = useBootstrapDashboard(userId);
+  const microTasksWidgetId = useMemo(
+    () => bootstrap?.widgets.find((w) => w.type === 'tasks')?.id ?? null,
+    [bootstrap?.widgets],
+  );
+
   useEffect(() => {
     if (cronCheckedRef.current || !widgetId || recurringGoals.length === 0) return;
     cronCheckedRef.current = true;
@@ -59,7 +71,7 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
 
     void (async () => {
       for (const { recurringGoal, triggerTime } of pending) {
-        await createGoal.mutateAsync({
+        const newGoal = await createGoal.mutateAsync({
           title: recurringGoal.title,
           value: recurringGoal.value,
           expected_hours: recurringGoal.expected_hours,
@@ -69,9 +81,23 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
           id: recurringGoal.id,
           last_triggered_at: triggerTime.toISOString(),
         });
+        // Mirror the new goal into micro-tasks. The MicroTasksWidget already
+        // listens for `cross-widget-drop` (used by manual goal→tasks drags);
+        // dispatching the same event here gives the cron-fired goal the
+        // exact behaviour the user gets when they manually drag.
+        if (microTasksWidgetId && newGoal?.id) {
+          window.dispatchEvent(
+            new CustomEvent('cross-widget-drop', {
+              detail: {
+                targetWidgetId: microTasksWidgetId,
+                goal: { id: newGoal.id, title: newGoal.title, categories: [] },
+              },
+            }),
+          );
+        }
       }
     })();
-  }, [widgetId, recurringGoals, createGoal, updateRecurringGoal]);
+  }, [widgetId, recurringGoals, createGoal, updateRecurringGoal, microTasksWidgetId]);
 
   const [editingGoal, setEditingGoal] = useState<{ id: string; value: string } | null>(null);
   const [newTitle, setNewTitle] = useState('');

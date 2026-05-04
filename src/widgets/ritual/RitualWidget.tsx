@@ -41,6 +41,8 @@ import {
   type TrioValue,
 } from '../../features/ritual/types';
 import { getSetState, getTodayKey, normaliseRitualState } from '../../features/ritual/utils';
+import { getClientTimezone, recordRitualAnswer } from '../../features/ritual/api';
+import { useAuthStore } from '../../stores/authStore';
 import { ConfirmDeleteButton } from '../../components/ConfirmDeleteButton';
 
 type RitualWidgetProps = {
@@ -85,6 +87,7 @@ function makeSet(name: string): RitualSet {
 }
 
 export function RitualWidget({ config, onUpdateConfig }: RitualWidgetProps) {
+  const userId = useAuthStore((s) => s.user?.id) ?? null;
   const cfg = readConfig(config);
   const sets = useMemo(() => cfg.sets ?? [], [cfg.sets]);
   const storedState = cfg.state;
@@ -156,12 +159,35 @@ export function RitualWidget({ config, onUpdateConfig }: RitualWidgetProps) {
   const goNext = useCallback(() => {
     if (!activeSet) return;
     const cur = getSetState(state, activeSet.id);
+    // The step the user is *currently on* — that's the one being answered.
+    // After the state update below, currentIndex will already point at the
+    // next step, so we resolve it here before mutating.
+    const stepBeingAnswered = activeSet.steps[cur.stepIndex];
+    if (stepBeingAnswered && userId) {
+      const value = cur.values[stepBeingAnswered.id] ?? null;
+      // Fire-and-forget: a network blip shouldn't block the user from
+      // proceeding to the next step. Errors are surfaced to the console
+      // (the api function rejects on Supabase failure) — UI stays snappy.
+      void recordRitualAnswer({
+        user_id: userId,
+        day_key: state.dayKey,
+        set_id: activeSet.id,
+        set_name: activeSet.name,
+        step_id: stepBeingAnswered.id,
+        step_type: stepBeingAnswered.type,
+        prompt: stepBeingAnswered.prompt,
+        value,
+        client_timezone: getClientTimezone(),
+      }).catch((err) => {
+        console.warn('Failed to persist ritual answer', err);
+      });
+    }
     const next = Math.min(activeSet.steps.length, cur.stepIndex + 1);
     updateState({
       ...state,
       answers: { ...state.answers, [activeSet.id]: { ...cur, stepIndex: next } },
     });
-  }, [activeSet, state, updateState]);
+  }, [activeSet, state, updateState, userId]);
 
   const goBack = useCallback(() => {
     if (!activeSet) return;
