@@ -127,7 +127,9 @@ export function useTimeTransferDrag({
         state.sourceLastStartedAt,
         // Important: we re-evaluate against the live now so a long drag
         // (~1m) over a running source can still claim the time it
-        // accumulated during the press itself.
+        // accumulated during the press itself. The render naturally happens
+        // every animation frame during drag, so this is the right cadence.
+        // eslint-disable-next-line react-hooks/purity -- intentional: timer math needs fresh Date.now()
         Date.now(),
       )
     : 0;
