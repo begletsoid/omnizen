@@ -1,20 +1,27 @@
 /**
- * Intent registry — the extension surface for future voice commands.
+ * Intent registry — the extension surface for voice commands.
  *
- * Adding a new intent = one new entry here + the matching `apply` function.
- * The LLM system prompt is generated from this map (see llm.ts), so adding
- * an intent automatically teaches the LLM to recognise it.
+ * Each entry teaches the LLM about a new command (system prompt is generated
+ * from this map in llm.ts) AND tells the dispatcher how to apply it. To add
+ * a new command: one entry here, no other code changes required.
  *
- * MVP ships with one intent: `start_microtask`. Future entries (add_goal,
- * resume_existing, add_note, mark_habit_done) are documented in the plan
- * file but DELIBERATELY not in the registry — the LLM should not propose
- * intents the dispatcher can't apply.
+ * Phase 2 (current):
+ *   - start_microtask: now has mode='resume' | 'create' (find-or-create).
+ *   - pause_current: stop the running task without creating a new one.
+ *   - add_goal: create a goal, optionally with value/expected_hours.
+ *   - undo_last: revert the most recent applied voice command (in undo.ts).
+ *
+ * undo_last lives in undo.ts (separate module to keep the registry simple)
+ * but is re-exported here so the LLM/dispatcher see a unified registry.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+import { applyUndoLast, validateUndoLast } from './undo';
 import type {
-  ApplyOutcome,
+  AddGoalPayload,
+  ApplyResult,
+  PauseCurrentPayload,
   StartMicrotaskPayload,
   WebhookContext,
 } from './types';
@@ -22,55 +29,57 @@ import type {
 export type IntentSpec = {
   /** Human-readable summary used in the LLM system prompt. */
   description: string;
-  /** When the LLM emits this intent, what the payload SHOULD look like. */
+  /** Block of pseudo-code shown in the prompt so the LLM knows the schema. */
   payloadShape: string;
   /** Validate the LLM-returned payload at runtime. Throw on invalid. */
   validatePayload: (raw: unknown) => Record<string, unknown>;
-  /** Apply the intent — mutate the DB and return effect IDs. */
+  /** Mutate the DB and produce {outcome, summary}. */
   apply: (
     supabase: SupabaseClient,
     payload: Record<string, unknown>,
     ctx: WebhookContext,
-  ) => Promise<ApplyOutcome>;
+  ) => Promise<ApplyResult>;
 };
 
-// --- start_microtask --------------------------------------------------------
+// ============================================================================
+// start_microtask (Phase 2: resume | create)
+// ============================================================================
 
 function validateStartMicrotask(raw: unknown): StartMicrotaskPayload {
   if (!raw || typeof raw !== 'object') {
     throw new Error('payload is not an object');
   }
   const obj = raw as Record<string, unknown>;
-  if (typeof obj.new_task_title !== 'string' || obj.new_task_title.trim().length === 0) {
-    throw new Error('new_task_title must be a non-empty string');
-  }
-  const goal_id = obj.goal_id === null || obj.goal_id === undefined
-    ? null
-    : typeof obj.goal_id === 'string' ? obj.goal_id : null;
-  const similar_task_id = obj.similar_task_id === null || obj.similar_task_id === undefined
-    ? null
-    : typeof obj.similar_task_id === 'string' ? obj.similar_task_id : null;
+  // mode is the discriminator. Default to 'create' for back-compat with any
+  // prompt edge case where the LLM forgets to emit it.
+  const mode = obj.mode === 'resume' ? 'resume' : 'create';
+  const resume_task_id =
+    typeof obj.resume_task_id === 'string' ? obj.resume_task_id : null;
+  const new_task_title =
+    typeof obj.new_task_title === 'string' && obj.new_task_title.trim().length > 0
+      ? obj.new_task_title.trim().slice(0, 200)
+      : null;
+  const goal_id = typeof obj.goal_id === 'string' ? obj.goal_id : null;
   const category_ids = Array.isArray(obj.category_ids)
     ? obj.category_ids.filter((x): x is string => typeof x === 'string')
     : [];
-  return {
-    new_task_title: obj.new_task_title.trim().slice(0, 200),
-    goal_id,
-    similar_task_id,
-    category_ids,
-  };
+
+  if (mode === 'resume' && !resume_task_id) {
+    throw new Error('mode=resume requires resume_task_id');
+  }
+  if (mode === 'create' && !new_task_title) {
+    throw new Error('mode=create requires new_task_title');
+  }
+
+  return { mode, resume_task_id, new_task_title, goal_id, category_ids };
 }
 
-async function resolveTargetWidget(
+async function resolveTargetTasksWidget(
   supabase: SupabaseClient,
   ctx: WebhookContext,
 ): Promise<string> {
-  // Lazy-init: if profiles.voice_target_widget_id is null, find the user's
-  // first 'tasks' widget and persist that choice for next time.
   if (ctx.voiceTargetWidgetId) return ctx.voiceTargetWidgetId;
 
-  // The user owns dashboards; widgets join through dashboard_id. We look up
-  // the user's tasks widget via that join.
   const { data: dashboards, error: dashErr } = await supabase
     .from('dashboards')
     .select('id')
@@ -89,11 +98,8 @@ async function resolveTargetWidget(
     .limit(1);
   if (widgetErr) throw new Error(`widgets lookup: ${widgetErr.message}`);
   const widget = widgets?.[0];
-  if (!widget) {
-    throw new Error('user has no `tasks`-type widget — add one first');
-  }
+  if (!widget) throw new Error('user has no `tasks`-type widget — add one first');
 
-  // Persist for future calls.
   await supabase
     .from('profiles')
     .update({ voice_target_widget_id: widget.id })
@@ -101,74 +107,108 @@ async function resolveTargetWidget(
   return widget.id;
 }
 
+/**
+ * Pause whatever micro-task is currently running (if any), incrementing its
+ * elapsed_seconds with the time since last_started_at. Returns the paused
+ * task's id so callers can record it.
+ *
+ * Shared between every intent that needs to free up the "single running
+ * task" slot before doing its own work.
+ */
+async function pauseRunningTask(
+  supabase: SupabaseClient,
+  userId: string,
+  excludeTaskId: string | null = null,
+): Promise<string | null> {
+  let query = supabase
+    .from('micro_tasks')
+    .select('id, last_started_at, elapsed_seconds, title')
+    .eq('user_id', userId)
+    .eq('timer_state', 'running')
+    .is('archived_at', null);
+  if (excludeTaskId) query = query.neq('id', excludeTaskId);
+  const { data: running, error: lookupErr } = await query.maybeSingle();
+  if (lookupErr) throw new Error(`running lookup: ${lookupErr.message}`);
+  if (!running) return null;
+
+  const startedAt = running.last_started_at as string | null;
+  const elapsedSeconds = Number(running.elapsed_seconds ?? 0);
+  const increment = startedAt
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000))
+    : 0;
+  const { error: pauseErr } = await supabase
+    .from('micro_tasks')
+    .update({
+      timer_state: 'paused',
+      last_started_at: null,
+      elapsed_seconds: elapsedSeconds + increment,
+    })
+    .eq('id', running.id)
+    .eq('user_id', userId);
+  if (pauseErr) throw new Error(`pause running: ${pauseErr.message}`);
+  return running.id as string;
+}
+
 async function applyStartMicrotask(
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
   ctx: WebhookContext,
-): Promise<ApplyOutcome> {
+): Promise<ApplyResult> {
   const p = payload as StartMicrotaskPayload;
-
-  // NOTE on RPC vs direct SQL:
-  // The existing pause_micro_task_timer / start_micro_task_timer / attach_
-  // categories_to_task RPCs are SECURITY DEFINER with internal `auth.uid()`
-  // ownership checks. Calling them with a service-role JWT yields auth.uid()
-  // = NULL, so every ownership predicate fails ("not found or not owned by
-  // user"). Service-role bypasses RLS but doesn't invent a user identity.
-  // Workaround: do the same updates with explicit user_id filters via the
-  // service-role client. Race-safe enough for one user (no concurrent voice
-  // commands in flight). Future fix: a *_as(p_task_id, p_user_id) variant
-  // of the RPCs that takes user_id as a parameter.
-
   const nowIso = new Date().toISOString();
 
-  // 1. Pause the currently running task (if any).
-  let pausedId: string | null = null;
-  const { data: running, error: runningErr } = await supabase
-    .from('micro_tasks')
-    .select('id, last_started_at, elapsed_seconds')
-    .eq('user_id', ctx.userId)
-    .eq('timer_state', 'running')
-    .is('archived_at', null)
-    .maybeSingle();
-  if (runningErr) throw new Error(`running lookup: ${runningErr.message}`);
-  if (running) {
-    const startedAt = running.last_started_at as string | null;
-    const elapsedSeconds = Number(running.elapsed_seconds ?? 0);
-    const increment = startedAt
-      ? Math.max(0, Math.floor((Date.parse(nowIso) - Date.parse(startedAt)) / 1000))
-      : 0;
-    const { error: pauseErr } = await supabase
+  if (p.mode === 'resume') {
+    // Validate the target task exists, isn't archived, belongs to user.
+    const { data: target, error: lookupErr } = await supabase
       .from('micro_tasks')
-      .update({
-        timer_state: 'paused',
-        last_started_at: null,
-        elapsed_seconds: elapsedSeconds + increment,
-      })
-      .eq('id', running.id)
+      .select('id, title, timer_state')
+      .eq('id', p.resume_task_id!)
+      .eq('user_id', ctx.userId)
+      .is('archived_at', null)
+      .maybeSingle();
+    if (lookupErr) throw new Error(`resume lookup: ${lookupErr.message}`);
+    if (!target) throw new Error(`task ${p.resume_task_id} not found or archived`);
+
+    // If it's already running — no-op, return early.
+    if (target.timer_state === 'running') {
+      return {
+        outcome: { applied_task_id: target.id as string },
+        summary: `«${target.title}» уже идёт`,
+      };
+    }
+
+    // Pause anyone else first, then start this one.
+    const pausedId = await pauseRunningTask(supabase, ctx.userId, target.id as string);
+    const { error: startErr } = await supabase
+      .from('micro_tasks')
+      .update({ timer_state: 'running', last_started_at: nowIso })
+      .eq('id', target.id)
       .eq('user_id', ctx.userId);
-    if (pauseErr) throw new Error(`pause running: ${pauseErr.message}`);
-    pausedId = running.id;
+    if (startErr) throw new Error(`resume start: ${startErr.message}`);
+
+    return {
+      outcome: { applied_task_id: target.id as string, paused_task_id: pausedId },
+      summary: `Возобновлена «${target.title}». Таймер запущен.`,
+    };
   }
 
-  // 2. Create the new micro-task in the user's target widget.
-  const widgetId = await resolveTargetWidget(supabase, ctx);
+  // mode === 'create' ------------------------------------------------------
+  const pausedId = await pauseRunningTask(supabase, ctx.userId);
+  const widgetId = await resolveTargetTasksWidget(supabase, ctx);
   const { data: created, error: insertErr } = await supabase
     .from('micro_tasks')
     .insert({
       widget_id: widgetId,
       user_id: ctx.userId,
-      title: p.new_task_title,
+      title: p.new_task_title!,
       goal_id: p.goal_id,
       timer_state: 'never',
       elapsed_seconds: 0,
     })
-    .select('id')
+    .select('id, title')
     .single();
   if (insertErr) throw new Error(`micro_tasks insert: ${insertErr.message}`);
 
-  // 3. Attach categories. Insert into the task_category_links join table
-  //    directly — the attach_categories_to_task RPC also has the auth.uid()
-  //    issue, and the join row needs no extra logic beyond (task_id, cat_id).
   if (p.category_ids.length > 0) {
     const { data: ownedCategories, error: catLookupErr } = await supabase
       .from('task_categories')
@@ -189,38 +229,220 @@ async function applyStartMicrotask(
     }
   }
 
-  // 4. Start the timer on the new task. There can be no peer in 'running'
-  //    state at this point (we paused above), so we just flip our own row.
   const { error: startErr } = await supabase
     .from('micro_tasks')
-    .update({
-      timer_state: 'running',
-      last_started_at: nowIso,
-    })
+    .update({ timer_state: 'running', last_started_at: nowIso })
     .eq('id', created.id)
     .eq('user_id', ctx.userId);
   if (startErr) throw new Error(`start timer: ${startErr.message}`);
 
-  return { applied_task_id: created.id, paused_task_id: pausedId };
+  const goalSuffix = p.goal_id ? ' (привязана к цели)' : '';
+  return {
+    outcome: { applied_task_id: created.id as string, paused_task_id: pausedId },
+    summary: `Создана задача «${created.title}»${goalSuffix}. Таймер запущен.`,
+  };
 }
 
-// --- Registry ---------------------------------------------------------------
+// ============================================================================
+// pause_current
+// ============================================================================
+
+function validatePauseCurrent(_raw: unknown): PauseCurrentPayload {
+  return {};
+}
+
+async function applyPauseCurrent(
+  supabase: SupabaseClient,
+  _payload: Record<string, unknown>,
+  ctx: WebhookContext,
+): Promise<ApplyResult> {
+  // Read the running task BEFORE pausing so we can name it in the summary.
+  const { data: running, error: lookupErr } = await supabase
+    .from('micro_tasks')
+    .select('id, title, last_started_at, elapsed_seconds')
+    .eq('user_id', ctx.userId)
+    .eq('timer_state', 'running')
+    .is('archived_at', null)
+    .maybeSingle();
+  if (lookupErr) throw new Error(`running lookup: ${lookupErr.message}`);
+  if (!running) {
+    return { outcome: {}, summary: 'Активной задачи нет.' };
+  }
+  const pausedId = await pauseRunningTask(supabase, ctx.userId);
+  if (!pausedId) {
+    return { outcome: {}, summary: 'Активной задачи нет.' };
+  }
+  // Compute total elapsed for the human summary (including the just-added increment).
+  const startedAt = running.last_started_at as string | null;
+  const baseElapsed = Number(running.elapsed_seconds ?? 0);
+  const increment = startedAt
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000))
+    : 0;
+  const totalSeconds = baseElapsed + increment;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const elapsedHuman = minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
+  return {
+    outcome: { paused_task_id: pausedId },
+    summary: `Поставил «${running.title}» на паузу (на счётчике ${elapsedHuman}).`,
+  };
+}
+
+// ============================================================================
+// add_goal
+// ============================================================================
+
+function validateAddGoal(raw: unknown): AddGoalPayload {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('payload is not an object');
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.title !== 'string' || obj.title.trim().length === 0) {
+    throw new Error('title must be a non-empty string');
+  }
+  // value & expected_hours arrive as numbers OR null. Accept strings for
+  // robustness ("100 часов" → LLM might send "100"); coerce.
+  const coerceNumber = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    title: obj.title.trim().slice(0, 200),
+    value: coerceNumber(obj.value),
+    expected_hours: coerceNumber(obj.expected_hours),
+  };
+}
+
+async function resolveTargetGoalsWidget(
+  supabase: SupabaseClient,
+  ctx: WebhookContext,
+): Promise<string> {
+  if (ctx.voiceTargetGoalsWidgetId) return ctx.voiceTargetGoalsWidgetId;
+
+  const { data: dashboards, error: dashErr } = await supabase
+    .from('dashboards')
+    .select('id')
+    .eq('user_id', ctx.userId);
+  if (dashErr) throw new Error(`dashboards lookup: ${dashErr.message}`);
+  const dashboardIds = (dashboards ?? []).map((d) => d.id);
+  if (dashboardIds.length === 0) {
+    throw new Error('user has no dashboards — cannot create goal');
+  }
+  const { data: widgets, error: widgetErr } = await supabase
+    .from('widgets')
+    .select('id')
+    .eq('type', 'goals')
+    .in('dashboard_id', dashboardIds)
+    .order('created_at', { ascending: true })
+    .limit(1);
+  if (widgetErr) throw new Error(`widgets lookup: ${widgetErr.message}`);
+  const widget = widgets?.[0];
+  if (!widget) throw new Error('user has no `goals`-type widget — add one first');
+
+  await supabase
+    .from('profiles')
+    .update({ voice_target_goals_widget_id: widget.id })
+    .eq('id', ctx.userId);
+  return widget.id;
+}
+
+async function applyAddGoal(
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+  ctx: WebhookContext,
+): Promise<ApplyResult> {
+  const p = payload as AddGoalPayload;
+  const widgetId = await resolveTargetGoalsWidget(supabase, ctx);
+
+  // Compute next sort_order so the new goal lands at the bottom.
+  const { data: maxRow, error: maxErr } = await supabase
+    .from('goals')
+    .select('sort_order')
+    .eq('widget_id', widgetId)
+    .order('sort_order', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (maxErr) throw new Error(`max sort_order lookup: ${maxErr.message}`);
+  const nextOrder = ((maxRow?.sort_order as number | null) ?? 0) + 1;
+
+  const { data: created, error: insertErr } = await supabase
+    .from('goals')
+    .insert({
+      widget_id: widgetId,
+      user_id: ctx.userId,
+      title: p.title,
+      value: p.value ?? 0,
+      expected_hours: p.expected_hours ?? 0,
+      sort_order: nextOrder,
+    })
+    .select('id, title')
+    .single();
+  if (insertErr) throw new Error(`goals insert: ${insertErr.message}`);
+
+  // Format an informative summary noting any optional fields that were set.
+  const parts: string[] = [`Создана цель «${created.title}»`];
+  if (p.expected_hours !== null) parts.push(`${p.expected_hours} ч`);
+  if (p.value !== null) parts.push(`${p.value} баллов`);
+  return {
+    outcome: { applied_goal_id: created.id as string },
+    summary:
+      parts.length === 1 ? `${parts[0]}.` : `${parts[0]} (${parts.slice(1).join(', ')}).`,
+  };
+}
+
+// ============================================================================
+// Registry
+// ============================================================================
 
 export const INTENT_REGISTRY: Record<string, IntentSpec> = {
   start_microtask: {
     description:
-      'Начать новую микрозадачу прямо сейчас. Текущая работающая задача (если есть) автоматически паузится; новая создаётся и стартует таймер.',
+      'Запустить микрозадачу. Если в НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ есть очень похожая по смыслу — ставь mode="resume" с её UUID. Иначе mode="create": если фраза явно про какую-то ОТКРЫТАЯ_ЦЕЛЬ — выставь её UUID в goal_id.',
     payloadShape: `{
-  "new_task_title": string,            // нормализованное короткое название задачи
-  "goal_id": string | null,            // UUID цели из ОТКРЫТЫЕ ЦЕЛИ если задача явно к ней относится
-  "similar_task_id": string | null,    // UUID из НЕДАВНИЕ МИКРОЗАДАЧИ если очень похожая задача найдена (для переноса категорий)
-  "category_ids": string[]             // 0..3 UUID из ДОСТУПНЫЕ КАТЕГОРИИ. Если similar_task_id указан — берём ЕГО категории.
+  "mode": "resume" | "create",
+  "resume_task_id": string | null,     // UUID существующей задачи (только при mode="resume")
+  "new_task_title": string | null,     // короткое название (только при mode="create")
+  "goal_id": string | null,            // UUID цели если задача явно к ней относится
+  "category_ids": string[]             // 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ (только при mode="create")
 }`,
-    validatePayload: (raw) => validateStartMicrotask(raw) as unknown as Record<string, unknown>,
+    validatePayload: (raw) =>
+      validateStartMicrotask(raw) as unknown as Record<string, unknown>,
     apply: applyStartMicrotask,
+  },
+
+  pause_current: {
+    description:
+      'Поставить текущую работающую микрозадачу на паузу, ничего не создавая. Используй для команд "стоп", "пауза", "закончил".',
+    payloadShape: `{}`,
+    validatePayload: (raw) => validatePauseCurrent(raw) as Record<string, unknown>,
+    apply: applyPauseCurrent,
+  },
+
+  add_goal: {
+    description:
+      'Создать новую цель в виджете целей. Используй для "добавь цель X", опционально с "цена N" / "время N часов".',
+    payloadShape: `{
+  "title": string,                     // название цели
+  "value": number | null,              // ценность (баллы для heatmap)
+  "expected_hours": number | null      // план часов до десятых (например 100 или 2.5)
+}`,
+    validatePayload: (raw) => validateAddGoal(raw) as unknown as Record<string, unknown>,
+    apply: applyAddGoal,
+  },
+
+  undo_last: {
+    description:
+      'Откатить последнюю применённую голосовую команду (как Ctrl+Z). Используй для "отмена". Может стоять перед другой командой ("отмена, начни X") — тогда сначала undo, потом следующая команда.',
+    payloadShape: `{}`,
+    validatePayload: (raw) => validateUndoLast(raw) as Record<string, unknown>,
+    apply: applyUndoLast,
   },
 };
 
 export function listKnownIntents(): string[] {
   return Object.keys(INTENT_REGISTRY);
 }
+
+// Export internal helpers reused from undo.ts to keep undo logic isolated.
+export { pauseRunningTask };

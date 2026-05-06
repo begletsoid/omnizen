@@ -26,6 +26,17 @@ export type VoiceTranscriptionRow = {
   applied_payload: Record<string, unknown> | null;
   applied_task_id: string | null;
   paused_task_id: string | null;
+  /** Phase 2: human-readable summary the toast/iOS notification shows. */
+  applied_summary: string | null;
+  /** Phase 2: full per-action history (for History UI debugging). */
+  applied_actions: Array<{
+    intent: string;
+    payload: Record<string, unknown>;
+    outcome: Record<string, unknown>;
+    summary: string;
+  }> | null;
+  /** Phase 2: id of the previously-applied row this undo reverted. */
+  undid_transcription_id: string | null;
   error_detail: string | null;
   audio_path: string;
   created_at: string;

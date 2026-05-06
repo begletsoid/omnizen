@@ -7,8 +7,21 @@ import {
   useProfile,
   useRotateSleepToken,
   useRotateVoiceToken,
+  useSetVoiceTargetGoalsWidget,
   useSetVoiceTargetWidget,
+  useUpdateVoiceIntentRules,
 } from '../features/profile/hooks';
+
+// Intents the user can map keywords to. Stays in sync with INTENT_REGISTRY
+// in netlify/functions/_voice/intents.ts. Hardcoded list because the
+// frontend can't import server-side code; small price for keeping the
+// intent registry server-only (avoids leaking SQL into the bundle).
+const VOICE_INTENT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'start_microtask', label: 'Начать микрозадачу (find-or-create)' },
+  { value: 'pause_current', label: 'Поставить таймер на паузу' },
+  { value: 'add_goal', label: 'Создать новую цель' },
+  { value: 'undo_last', label: 'Откатить предыдущую команду' },
+];
 
 type SettingsModalProps = {
   userId: string | null;
@@ -25,9 +38,16 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
   const ensureVoiceToken = useEnsureVoiceToken(userId);
   const rotateVoiceToken = useRotateVoiceToken(userId);
   const setVoiceTargetWidget = useSetVoiceTargetWidget(userId);
+  const setVoiceTargetGoalsWidget = useSetVoiceTargetGoalsWidget(userId);
+  const updateVoiceRules = useUpdateVoiceIntentRules(userId);
   const [copied, setCopied] = useState<CopyKind | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [showVoiceToken, setShowVoiceToken] = useState(false);
+  // Local draft of the rules being edited — kept here so the user can type
+  // a new keyword without each keystroke firing a mutation. Saved on blur
+  // / Enter / explicit "Add" via setRulesDraft -> mutation.
+  const [rulesDraft, setRulesDraft] = useState<Array<{ keyword: string; intent: string }>>([]);
+  const [rulesDirty, setRulesDirty] = useState(false);
 
   // Make sure a token exists the moment the modal opens — users who never
   // rotated just see it populated automatically. Same lazy-init for voice.
@@ -54,7 +74,61 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
   const tz = profile?.timezone ?? 'UTC';
   const lastBedtime = profile?.last_bedtime_at ?? null;
   const voiceTargetWidgetId = profile?.voice_target_widget_id ?? null;
+  const voiceTargetGoalsWidgetId = profile?.voice_target_goals_widget_id ?? null;
   const tasksWidgets = (bootstrap?.widgets ?? []).filter((w) => w.type === 'tasks');
+  const goalsWidgets = (bootstrap?.widgets ?? []).filter((w) => w.type === 'goals');
+
+  // Sync the rules editor draft from server state when the profile loads or
+  // when an external change updates voice_intent_rules.
+  useEffect(() => {
+    if (!profile) return;
+    if (rulesDirty) return; // user is editing — don't clobber their draft
+    const entries = Object.entries(profile.voice_intent_rules ?? {}).map(
+      ([keyword, intent]) => ({ keyword, intent }),
+    );
+    setRulesDraft(entries);
+  }, [profile, rulesDirty]);
+
+  const persistRules = useCallback(
+    (entries: Array<{ keyword: string; intent: string }>) => {
+      const map: Record<string, string> = {};
+      for (const { keyword, intent } of entries) {
+        const k = keyword.trim().toLowerCase();
+        if (k && intent) map[k] = intent;
+      }
+      updateVoiceRules.mutate(map);
+      setRulesDirty(false);
+    },
+    [updateVoiceRules],
+  );
+
+  const handleRuleKeywordChange = (idx: number, value: string) => {
+    setRulesDraft((prev) => prev.map((r, i) => (i === idx ? { ...r, keyword: value } : r)));
+    setRulesDirty(true);
+  };
+  const handleRuleIntentChange = (idx: number, value: string) => {
+    setRulesDraft((prev) => {
+      const next = prev.map((r, i) => (i === idx ? { ...r, intent: value } : r));
+      // Intent change is committal — persist immediately (the dropdown isn't
+      // something the user "types into", so no debounce needed).
+      persistRules(next);
+      return next;
+    });
+  };
+  const handleRuleBlur = () => {
+    if (rulesDirty) persistRules(rulesDraft);
+  };
+  const handleAddRule = () => {
+    setRulesDraft((prev) => [...prev, { keyword: '', intent: 'start_microtask' }]);
+    setRulesDirty(true);
+  };
+  const handleRemoveRule = (idx: number) => {
+    setRulesDraft((prev) => {
+      const next = prev.filter((_, i) => i !== idx);
+      persistRules(next);
+      return next;
+    });
+  };
 
   const copy = useCallback(
     async (kind: CopyKind, value: string) => {
@@ -84,6 +158,11 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
   const handleSelectTargetWidget = (event: ChangeEvent<HTMLSelectElement>) => {
     const value = event.target.value;
     setVoiceTargetWidget.mutate(value === '' ? null : value);
+  };
+
+  const handleSelectTargetGoalsWidget = (event: ChangeEvent<HTMLSelectElement>) => {
+    const value = event.target.value;
+    setVoiceTargetGoalsWidget.mutate(value === '' ? null : value);
   };
 
   return (
@@ -383,16 +462,109 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
           )}
         </section>
 
+        <section className="mb-4">
+          <h3 className="mb-2 text-xs uppercase tracking-widest text-muted">
+            Виджет для новых целей
+          </h3>
+          <p className="mb-1 text-xs text-muted">
+            В каком виджете создавать цели по команде «добавь цель …». Если не выбрано —
+            при первой такой команде используется первый <code>goals</code>-виджет
+            и сохраняется здесь автоматически.
+          </p>
+          {goalsWidgets.length === 0 ? (
+            <p className="text-xs text-rose-300">
+              Нет виджетов типа «Цели». Добавь хотя бы один на дашборде.
+            </p>
+          ) : (
+            <select
+              value={voiceTargetGoalsWidgetId ?? ''}
+              onChange={handleSelectTargetGoalsWidget}
+              disabled={setVoiceTargetGoalsWidget.isPending}
+              className="w-full rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-text outline-none disabled:opacity-50"
+            >
+              <option value="">— автоматически (первый виджет) —</option>
+              {goalsWidgets.map((widget) => {
+                const title = (widget.config?.title as string | undefined) ?? widget.id.slice(0, 8);
+                return (
+                  <option key={widget.id} value={widget.id}>
+                    {title}
+                  </option>
+                );
+              })}
+            </select>
+          )}
+        </section>
+
+        <section className="mb-4">
+          <h3 className="mb-2 flex items-center justify-between text-xs uppercase tracking-widest text-muted">
+            Голосовые правила (keyword → команда)
+            <button
+              type="button"
+              onClick={handleAddRule}
+              className="rounded-full border border-white/10 px-2.5 py-0.5 text-[0.65rem] normal-case tracking-normal text-muted transition hover:border-white/40 hover:text-text"
+            >
+              + правило
+            </button>
+          </h3>
+          <p className="mb-2 text-xs text-muted">
+            Если фраза содержит ключевое слово, LLM должен предпочесть указанную команду.
+            Дефолтные правила: <code>отмена → undo_last</code>, <code>стоп / пауза → pause_current</code>,
+            <code> добавь цель → add_goal</code>.
+          </p>
+          {rulesDraft.length === 0 ? (
+            <p className="text-xs text-muted">Правил нет — LLM решает сам по смыслу фразы.</p>
+          ) : (
+            <ul className="space-y-1">
+              {rulesDraft.map((rule, idx) => (
+                <li key={idx} className="flex items-stretch gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="ключевое слово"
+                    value={rule.keyword}
+                    onChange={(e) => handleRuleKeywordChange(idx, e.target.value)}
+                    onBlur={handleRuleBlur}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    className="min-w-0 flex-1 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-text outline-none"
+                  />
+                  <select
+                    value={rule.intent}
+                    onChange={(e) => handleRuleIntentChange(idx, e.target.value)}
+                    className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-xs text-text outline-none"
+                  >
+                    {VOICE_INTENT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRule(idx)}
+                    aria-label="Удалить правило"
+                    className="rounded-md border border-white/10 px-2 text-xs text-muted transition hover:border-rose-400/40 hover:text-rose-200"
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
         <section>
           <details className="text-xs text-muted">
             <summary className="cursor-pointer select-none text-text">
-              Как настроить iOS Shortcut (offline-safe, 8 действий)
+              Как настроить iOS Shortcut (5 действий)
             </summary>
 
             <p className="mt-2">
-              Один shortcut запускается с Action Button и сразу пишет звук.
-              Сохраняем файл в локальную папку <em>до</em> отправки — если интернета
-              нет, файл останется на iPhone и его подберёт второй shortcut «Retry voice queue».
+              Простой shortcut: записал → отправил → получил уведомление с результатом.
+              Без сохранения на диск — если интернета нет, iOS просто покажет ошибку и ты
+              скажешь команду повторно.
             </p>
 
             <p className="mt-2 font-semibold text-text">Команда «Voice Microtask»</p>
@@ -401,27 +573,13 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
                 <b>Команды → ➕ → новая команда</b>, назвать «Voice Microtask».
               </li>
               <li>
-                Action <b>«Записать звук»</b>:
-                <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Окончание: <code>По нажатию</code> (пользователь нажимает Стоп вручную).</li>
-                  <li>Качество: <code>Обычное</code>.</li>
-                  <li>Показывать индикатор записи: <code>Вкл</code>.</li>
-                </ul>
+                Action <b>«Записать звук»</b>: окончание <code>По нажатию</code>,
+                качество <code>Обычное</code>, показывать индикатор записи <code>Вкл</code>.
               </li>
               <li>
-                Action <b>«Получить URL»</b> (для генерации идентификатора):
-                <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Получить пустую переменную «UUID» через action «UUID» (если есть)
-                  или используй <code>Текущая дата</code> в формате ISO как fallback идентификатор.</li>
-                </ul>
-              </li>
-              <li>
-                Action <b>«Сохранить файл»</b>:
-                <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Файл: переменная «Записанный звук» из шага 2.</li>
-                  <li>Путь: <code>На iPhone / Shortcuts / voice-pending / [UUID].m4a</code>.</li>
-                  <li>Перезаписывать: <code>Вкл</code>.</li>
-                </ul>
+                Action <b>«Случайное число»</b> от <code>0</code> до <code>9999999999</code>.
+                Эта переменная пойдёт как <code>idempotency_key</code> — защищает от дубликатов
+                при повторных нажатиях.
               </li>
               <li>
                 Action <b>«Получить содержимое URL»</b>:
@@ -429,46 +587,37 @@ export function SettingsModal({ userId, onClose }: SettingsModalProps) {
                   <li>URL: <code>{voiceWebhookUrl}</code>.</li>
                   <li>Метод: <code>POST</code>.</li>
                   <li>
-                    Заголовки: <code>Authorization: Bearer {voiceToken || '<твой-токен>'}</code>.
+                    Заголовок: <code>Authorization: Bearer {voiceToken || '<твой-токен>'}</code>.
                   </li>
                   <li>
-                    Тело запроса: <code>Form</code> с полями:
+                    Тело запроса: <code>Форма</code> (Multipart Form), два поля:
                     <ul className="ml-4 list-disc">
-                      <li><code>audio</code> = Файл (тип <i>File</i>) → переменная «Записанный звук».</li>
-                      <li><code>idempotency_key</code> = Текст → UUID из шага 3.</li>
+                      <li><code>audio</code> — тип <b>Файл</b>, значение «Записанный звук».</li>
+                      <li><code>idempotency_key</code> — тип <b>Текст</b>, значение «Случайное число».</li>
                     </ul>
                   </li>
                 </ul>
               </li>
               <li>
-                Action <b>«Если» → Числовое значение «Код состояния» равно 200</b>:
+                Action <b>«Получить значение словаря»</b>:
                 <ul className="ml-4 mt-1 list-disc space-y-0.5 text-muted">
-                  <li>Внутри: action <b>«Удалить файл»</b> → файл из шага 4 (отправили — можно удалять).</li>
-                  <li>В блоке «Иначе»: action <b>«Показать уведомление»</b> с текстом
-                  «Не отправлено, останется в очереди».</li>
+                  <li>Получить значение для <code>summary</code>.</li>
+                  <li>В словаре: «Содержимое URL» из предыдущего шага.</li>
                 </ul>
               </li>
               <li>
-                Готово. Привязать: <b>Настройки iPhone → Action Button → Команда → Voice Microtask</b>.
-              </li>
-            </ol>
-
-            <p className="mt-3 font-semibold text-text">Команда «Retry voice queue»</p>
-            <ol className="ml-5 mt-2 list-decimal space-y-1.5">
-              <li>Action <b>«Получить файлы из папки»</b>: <code>Shortcuts/voice-pending/</code>.</li>
-              <li>
-                Action <b>«Повторить с каждым»</b> → внутри тела цикла повтори шаги 5-6
-                из основного shortcut (POST + удалить при 200).
+                Action <b>«Показать уведомление»</b>: текст — переменная «Значение словаря»
+                (это и будет «Создана задача "X". Таймер запущен.»).
               </li>
               <li>
-                Запускай вручную или через <b>Личная автоматизация</b> при подключении к Wi-Fi.
+                Привязать: <b>Настройки iPhone → Action Button → Команда → Voice Microtask</b>.
               </li>
             </ol>
 
             <p className="mt-3">
-              <b>Первый запуск:</b> iOS попросит доступ к микрофону, файлам и сети — одобри.
-              Если кнопка Action Button срабатывает на залоченном iPhone — нужно будет
-              разблокировать FaceID, чтобы появилась кнопка Стоп записи.
+              <b>Первый запуск:</b> iOS попросит доступ к микрофону и сети — одобри.
+              На залоченном iPhone Action Button сначала попросит FaceID — это нужно
+              чтобы появилась кнопка «Стоп» записи.
             </p>
           </details>
         </section>

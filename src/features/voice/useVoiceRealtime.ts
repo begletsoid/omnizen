@@ -31,24 +31,36 @@ export type VoiceToast = {
 const TOAST_TTL_MS = 4000;
 
 function summariseTitle(row: VoiceTranscriptionRow): string {
+  // Phase 2: prefer the server-built summary verbatim — it's already the
+  // user-facing string ("Создана задача «X». Таймер запущен.").
+  if (typeof row.applied_summary === 'string' && row.applied_summary.length > 0) {
+    return row.applied_summary;
+  }
+  // Backward-compat with phase 1 rows that don't have applied_summary yet.
   const payload = row.applied_payload;
   if (payload && typeof payload === 'object' && 'new_task_title' in payload) {
     const title = (payload as { new_task_title?: unknown }).new_task_title;
-    if (typeof title === 'string') return title;
+    if (typeof title === 'string') return `Голос: «${title}» запущена`;
   }
-  if (row.raw_transcript) return row.raw_transcript.slice(0, 80);
-  return '(без названия)';
+  if (row.raw_transcript) return `Голос: ${row.raw_transcript.slice(0, 80)}`;
+  return 'Голос: команда применена';
 }
 
 function statusToToast(row: VoiceTranscriptionRow): VoiceToast | null {
   if (row.status === 'applied') {
+    return { id: row.id, kind: 'applied', text: summariseTitle(row) };
+  }
+  // Error variants: prefer the server's applied_summary (which now also
+  // gets populated for errors with a friendly message), fall back to the
+  // canonical title per status.
+  if (typeof row.applied_summary === 'string' && row.applied_summary.length > 0) {
     return {
       id: row.id,
-      kind: 'applied',
-      text: `Голос: «${summariseTitle(row)}» запущена`,
+      kind: 'error',
+      text: row.applied_summary,
+      detail: row.error_detail ?? null,
     };
   }
-  // Error variants: short user-facing message + technical detail.
   const errorTitles: Record<string, string> = {
     error_stt: 'Не разобрал звук',
     error_llm: 'Не смог классифицировать',

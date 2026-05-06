@@ -9,7 +9,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-import type { LlmClassification, VoiceStatus } from './types';
+import type { AppliedActionRecord, LlmActionPlan, VoiceStatus } from './types';
 
 export function getServiceClient(): SupabaseClient {
   const supabaseUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL;
@@ -25,6 +25,7 @@ export function getServiceClient(): SupabaseClient {
 export type ProfileForVoice = {
   id: string;
   voice_target_widget_id: string | null;
+  voice_target_goals_widget_id: string | null;
   voice_intent_rules: Record<string, string>;
 };
 
@@ -38,7 +39,9 @@ export async function findProfileByVoiceToken(
 ): Promise<ProfileForVoice | null> {
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, voice_target_widget_id, voice_intent_rules')
+    .select(
+      'id, voice_target_widget_id, voice_target_goals_widget_id, voice_intent_rules',
+    )
     .eq('voice_webhook_token', token)
     .maybeSingle();
   if (error) throw new Error(`Profile lookup failed: ${error.message}`);
@@ -46,6 +49,7 @@ export async function findProfileByVoiceToken(
   return {
     id: data.id,
     voice_target_widget_id: data.voice_target_widget_id ?? null,
+    voice_target_goals_widget_id: data.voice_target_goals_widget_id ?? null,
     voice_intent_rules:
       (data.voice_intent_rules as Record<string, string> | null) ?? {},
   };
@@ -120,12 +124,18 @@ export async function updateRow(
   rowId: string,
   patch: {
     status?: VoiceStatus;
-    raw_transcript?: string;
-    llm_output?: LlmClassification;
+    raw_transcript?: string | null;
+    llm_output?: LlmActionPlan | null;
     applied_intent?: string | null;
     applied_payload?: Record<string, unknown> | null;
     applied_task_id?: string | null;
     paused_task_id?: string | null;
+    /** Phase 2: full action history for the row. */
+    applied_actions?: AppliedActionRecord[] | null;
+    /** Phase 2: human-readable summary the iOS notification displays. */
+    applied_summary?: string | null;
+    /** Phase 2: undo bookkeeping. */
+    undid_transcription_id?: string | null;
     error_detail?: string | null;
     processed_at?: string | null;
   },

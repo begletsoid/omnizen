@@ -1,16 +1,13 @@
 /**
- * LLM classification: transcript → {intent, payload, confidence, raw_user_phrase}.
+ * LLM action-plan classifier (Phase 2).
+ *
+ * Phase 1 returned a single intent. Phase 2 returns an array of actions to
+ * support undo+chain combos like "Отмена, начни X" → [undo_last, start_microtask].
  *
  * Provider order (free → paid):
  *   1. Groq Llama-3.3-70b — generous free tier, OpenAI-compatible JSON mode.
  *   2. Anthropic Claude Haiku — paid, used only if ANTHROPIC_API_KEY is set.
  *   3. OpenAI gpt-4o-mini — paid, ultimate fallback.
- *
- * Why Groq primary: the user's account is on Groq's free tier (no credit
- * card required), and Llama-3.3-70b classifies short Russian phrases against
- * a fixed JSON schema with quality close to Claude Haiku. We fall through
- * to paid providers only when their API keys are explicitly configured AND
- * Groq itself errored — keeps the pipeline working even if Groq is down.
  *
  * The system prompt is generated from INTENT_REGISTRY so adding intents
  * later doesn't require touching this file.
@@ -19,7 +16,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { INTENT_REGISTRY } from './intents';
-import type { LlmClassification } from './types';
+import { MAX_ACTIONS_PER_COMMAND, type LlmAction, type LlmActionPlan } from './types';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -56,10 +53,15 @@ export async function loadLlmContext(
       .is('archived_at', null)
       .order('sort_order', { ascending: true })
       .limit(50),
+    // Phase 2: only ACTIVE micro-tasks (not done, not archived) qualify
+    // for resume — we mustn't restart a finished one. Limit raised to 30
+    // by recency; the LLM has more options to match against.
     supabase
       .from('micro_tasks')
       .select('id, title, created_at, task_category_links(category_id, task_categories(name))')
       .eq('user_id', userId)
+      .eq('is_done', false)
+      .is('archived_at', null)
       .gte('created_at', fourteenDaysAgo)
       .order('created_at', { ascending: false })
       .limit(30),
@@ -109,31 +111,37 @@ export function buildSystemPrompt(
   const tasksJson = JSON.stringify(context.recent_tasks);
   const categoriesJson = JSON.stringify(context.categories);
 
-  return `Ты помощник, который превращает голосовую заметку пользователя в команду для дашборда.
+  return `Ты помощник, который превращает голосовую заметку пользователя в план команд (actions) для дашборда.
 
 ДОСТУПНЫЕ INTENT'Ы:
 ${intentSection}${rulesHint}
 
 КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ:
-ОТКРЫТЫЕ ЦЕЛИ: ${goalsJson}
-НЕДАВНИЕ МИКРОЗАДАЧИ (последние 14 дней): ${tasksJson}
-ДОСТУПНЫЕ КАТЕГОРИИ: ${categoriesJson}
+ОТКРЫТЫЕ_ЦЕЛИ: ${goalsJson}
+НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ (не done, не archived, последние 14 дней): ${tasksJson}
+ДОСТУПНЫЕ_КАТЕГОРИИ: ${categoriesJson}
 
 ОТВЕТЬ СТРОГО JSON В ФОРМАТЕ:
 {
-  "intent": "<один из доступных intent'ов>",
-  "payload": <согласно схеме выбранного intent'а>,
+  "actions": [
+    { "intent": "<один из доступных>", "payload": <согласно схеме intent'а> }
+    // 1..${MAX_ACTIONS_PER_COMMAND} элементов; обычно 1
+  ],
   "confidence": "high" | "medium" | "low",
   "raw_user_phrase": "<точная фраза пользователя>"
 }
 
 Правила:
-1. similar_task_id ставь ТОЛЬКО при очень высоком сходстве (та же самая активность). Иначе null.
-2. Если similar_task_id найден — category_ids = его категории. Не выдумывай новые.
-3. Никогда не возвращай category_ids с UUID, которых НЕТ в ДОСТУПНЫЕ КАТЕГОРИИ.
-4. goal_id ставь, только если связь явная.
-5. Никогда не выдумывай UUID. Все UUID — только из контекста выше или null.
-6. Никакого текста кроме JSON.`;
+1. **Однокомандный голос → массив длины 1.** Если фраза — одна команда, всегда возвращай ОДИН элемент в actions.
+2. **Цепочки (undo + следующая команда):** если фраза начинается с "отмена" / "отмени" и продолжается ("отмена, начни X") — возвращай ДВА элемента: сначала undo_last, потом следующая команда.
+3. **Дефолт = start_microtask:** если фраза не подпадает ни под одно правило и звучит как описание активности ("обед", "код-ревью", "пишу статью") — это start_microtask.
+4. **Find-or-create для start_microtask:**
+   - Сначала проверь НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ. Если есть задача с очень похожим по смыслу названием — ставь mode="resume", resume_task_id = её UUID, остальные поля null/[].
+   - Иначе mode="create", new_task_title = нормализованное название, и если фраза явно про какую-то ОТКРЫТУЮ_ЦЕЛЬ — выставь её UUID в goal_id.
+   - category_ids: 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ, подходящие по смыслу. Никогда не выдумывай UUID, не указывай те которых нет в списке.
+5. **Парсинг add_goal:** "добавь цель X цена N время N часов" — title=X, value=N (если "цена"), expected_hours=N (если "время"). value/expected_hours = null если не упомянуты.
+6. **Никаких UUID, которых нет в КОНТЕКСТЕ.** Все UUID — строго из ОТКРЫТЫЕ_ЦЕЛИ / НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ / ДОСТУПНЫЕ_КАТЕГОРИИ или null.
+7. **Никакого текста кроме JSON.** Никаких \`\`\` обёрток.`;
 }
 
 function extractJson(text: string): unknown {
@@ -247,9 +255,59 @@ async function callGroq(
   return text;
 }
 
-export type LlmSuccess = { ok: true; classification: LlmClassification };
+export type LlmSuccess = { ok: true; plan: LlmActionPlan };
 export type LlmFailure = { ok: false; reason: 'all_providers_failed'; detail: string };
 export type LlmResult = LlmSuccess | LlmFailure;
+
+/**
+ * Coerce LLM output into an LlmActionPlan. Backward-compat: if the model
+ * returned the Phase 1 single-intent shape `{intent, payload, ...}`, wrap
+ * it in `actions: [{intent, payload}]`. Reject anything that's neither.
+ */
+export function parseActionPlan(raw: unknown, fallbackTranscript: string): LlmActionPlan | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+
+  const confidenceRaw = obj.confidence;
+  const confidence: 'high' | 'medium' | 'low' =
+    confidenceRaw === 'high' || confidenceRaw === 'medium' || confidenceRaw === 'low'
+      ? confidenceRaw
+      : 'medium';
+  const raw_user_phrase =
+    typeof obj.raw_user_phrase === 'string' ? obj.raw_user_phrase : fallbackTranscript;
+
+  // Phase 2 shape: { actions: [...] }.
+  if (Array.isArray(obj.actions)) {
+    const actions: LlmAction[] = [];
+    // Filter first, slice second — invalid entries shouldn't consume the
+    // 3-action budget. (e.g. ["good", null, "good"] should yield 2 actions,
+    // not 1 because slice dropped the second "good".)
+    for (const entry of obj.actions) {
+      if (actions.length >= MAX_ACTIONS_PER_COMMAND) break;
+      if (!entry || typeof entry !== 'object') continue;
+      const e = entry as Record<string, unknown>;
+      const intent = typeof e.intent === 'string' ? e.intent : '';
+      const payload =
+        e.payload && typeof e.payload === 'object' ? (e.payload as Record<string, unknown>) : {};
+      if (intent) actions.push({ intent, payload });
+    }
+    if (actions.length === 0) return null;
+    return { actions, confidence, raw_user_phrase };
+  }
+
+  // Backward-compat: Phase 1 single-intent shape.
+  if (typeof obj.intent === 'string') {
+    const payload =
+      obj.payload && typeof obj.payload === 'object' ? (obj.payload as Record<string, unknown>) : {};
+    return {
+      actions: [{ intent: obj.intent, payload }],
+      confidence,
+      raw_user_phrase,
+    };
+  }
+
+  return null;
+}
 
 export async function classifyVoice(
   supabase: SupabaseClient,
@@ -300,27 +358,13 @@ export async function classifyVoice(
   }
 
   const parsed = extractJson(raw);
-  if (!parsed || typeof parsed !== 'object') {
+  const plan = parseActionPlan(parsed, args.transcript);
+  if (!plan) {
     return {
       ok: false,
       reason: 'all_providers_failed',
-      detail: `parsed result is not an object: ${raw.slice(0, 100)}`,
+      detail: `LLM returned no actions: ${raw.slice(0, 200)}`,
     };
   }
-  const obj = parsed as Record<string, unknown>;
-  const intent = typeof obj.intent === 'string' ? obj.intent : '';
-  const payload =
-    obj.payload && typeof obj.payload === 'object' ? (obj.payload as Record<string, unknown>) : {};
-  const confidenceRaw = obj.confidence;
-  const confidence: 'high' | 'medium' | 'low' =
-    confidenceRaw === 'high' || confidenceRaw === 'medium' || confidenceRaw === 'low'
-      ? confidenceRaw
-      : 'medium';
-  const raw_user_phrase =
-    typeof obj.raw_user_phrase === 'string' ? obj.raw_user_phrase : args.transcript;
-
-  return {
-    ok: true,
-    classification: { intent, payload, confidence, raw_user_phrase },
-  };
+  return { ok: true, plan };
 }

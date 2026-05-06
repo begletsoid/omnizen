@@ -9,6 +9,7 @@ export type ProfileRecord = {
   sleep_webhook_token: string | null;
   voice_webhook_token: string | null;
   voice_target_widget_id: string | null;
+  voice_target_goals_widget_id: string | null;
   voice_intent_rules: Record<string, string>;
 };
 
@@ -22,7 +23,7 @@ export async function fetchProfile(userId: string): Promise<ProfileRecord | null
   const { data, error } = await client
     .from('profiles')
     .select(
-      'id, timezone, last_bedtime_at, sleep_webhook_token, voice_webhook_token, voice_target_widget_id, voice_intent_rules',
+      'id, timezone, last_bedtime_at, sleep_webhook_token, voice_webhook_token, voice_target_widget_id, voice_target_goals_widget_id, voice_intent_rules',
     )
     .eq('id', userId)
     .maybeSingle();
@@ -109,6 +110,42 @@ export async function updateVoiceTargetWidget(
   const { error } = await client
     .from('profiles')
     .update({ voice_target_widget_id: widgetId })
+    .eq('id', userId);
+  if (error) throw error;
+}
+
+export async function updateVoiceTargetGoalsWidget(
+  userId: string,
+  widgetId: string | null,
+): Promise<void> {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('profiles')
+    .update({ voice_target_goals_widget_id: widgetId })
+    .eq('id', userId);
+  if (error) throw error;
+}
+
+/**
+ * Replace the entire voice_intent_rules map. The shape is
+ * `Record<string, string>` (keyword → intent name). Empty keyword keys are
+ * dropped before persisting.
+ */
+export async function updateVoiceIntentRules(
+  userId: string,
+  rules: Record<string, string>,
+): Promise<void> {
+  const client = requireSupabase();
+  const cleaned: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rules)) {
+    const key = k.trim().toLowerCase();
+    if (key && typeof v === 'string' && v.trim().length > 0) {
+      cleaned[key] = v.trim();
+    }
+  }
+  const { error } = await client
+    .from('profiles')
+    .update({ voice_intent_rules: cleaned })
     .eq('id', userId);
   if (error) throw error;
 }

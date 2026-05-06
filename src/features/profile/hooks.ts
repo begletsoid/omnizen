@@ -9,6 +9,8 @@ import {
   rotateSleepWebhookToken,
   rotateVoiceWebhookToken,
   updateProfileTimezone,
+  updateVoiceIntentRules,
+  updateVoiceTargetGoalsWidget,
   updateVoiceTargetWidget,
   type ProfileRecord,
 } from './api';
@@ -96,6 +98,50 @@ export function useSetVoiceTargetWidget(userId: string | null) {
       queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
         prev ? { ...prev, voice_target_widget_id: widgetId } : prev,
       );
+    },
+  });
+}
+
+export function useSetVoiceTargetGoalsWidget(userId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (widgetId: string | null) => {
+      if (!userId) throw new Error('Not signed in');
+      await updateVoiceTargetGoalsWidget(userId, widgetId);
+      return widgetId;
+    },
+    onSuccess: (widgetId) => {
+      queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
+        prev ? { ...prev, voice_target_goals_widget_id: widgetId } : prev,
+      );
+    },
+  });
+}
+
+export function useUpdateVoiceIntentRules(userId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (rules: Record<string, string>) => {
+      if (!userId) throw new Error('Not signed in');
+      await updateVoiceIntentRules(userId, rules);
+      return rules;
+    },
+    // Optimistic update so the rule editor doesn't lag behind keystrokes.
+    onMutate: async (rules) => {
+      await queryClient.cancelQueries({ queryKey: PROFILE_KEY(userId) });
+      const previous = queryClient.getQueryData<ProfileRecord | null>(PROFILE_KEY(userId));
+      queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
+        prev ? { ...prev, voice_intent_rules: rules } : prev,
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(PROFILE_KEY(userId), context.previous);
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: PROFILE_KEY(userId) });
     },
   });
 }
