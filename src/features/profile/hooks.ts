@@ -4,9 +4,12 @@ import { useEffect } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 import {
   ensureSleepWebhookToken,
+  ensureVoiceWebhookToken,
   fetchProfile,
   rotateSleepWebhookToken,
+  rotateVoiceWebhookToken,
   updateProfileTimezone,
+  updateVoiceTargetWidget,
   type ProfileRecord,
 } from './api';
 
@@ -46,6 +49,52 @@ export function useEnsureSleepToken(userId: string | null) {
     onSuccess: (token) => {
       queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
         prev ? { ...prev, sleep_webhook_token: token } : prev,
+      );
+    },
+  });
+}
+
+export function useEnsureVoiceToken(userId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!userId) throw new Error('Not signed in');
+      return ensureVoiceWebhookToken(userId);
+    },
+    onSuccess: (token) => {
+      queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
+        prev ? { ...prev, voice_webhook_token: token } : prev,
+      );
+    },
+  });
+}
+
+export function useRotateVoiceToken(userId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!userId) throw new Error('Not signed in');
+      return rotateVoiceWebhookToken(userId);
+    },
+    onSuccess: (token) => {
+      queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
+        prev ? { ...prev, voice_webhook_token: token } : prev,
+      );
+    },
+  });
+}
+
+export function useSetVoiceTargetWidget(userId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (widgetId: string | null) => {
+      if (!userId) throw new Error('Not signed in');
+      await updateVoiceTargetWidget(userId, widgetId);
+      return widgetId;
+    },
+    onSuccess: (widgetId) => {
+      queryClient.setQueryData<ProfileRecord | null>(PROFILE_KEY(userId), (prev) =>
+        prev ? { ...prev, voice_target_widget_id: widgetId } : prev,
       );
     },
   });

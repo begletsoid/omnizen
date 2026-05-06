@@ -11,6 +11,8 @@ import { useBootstrapDashboard } from '../features/dashboards/hooks';
 import type { WidgetRecord } from '../features/dashboards/types';
 import { updateWidgetConfig } from '../features/dashboards/api';
 import { useSyncProfileTimezone } from '../features/profile/hooks';
+import { useVoiceRealtime } from '../features/voice/useVoiceRealtime';
+import { VoiceToastView } from '../features/voice/VoiceToast';
 import type { LayoutItem } from '../features/layout/types';
 import { useDashboardLayout } from '../features/layout/hooks';
 import {
@@ -90,6 +92,7 @@ export function DashboardShell() {
   const userId = user?.id ?? null;
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   useSyncProfileTimezone(userId);
+  const { toast: voiceToast, dismissToast: dismissVoiceToast } = useVoiceRealtime(userId);
   const {
     data: bootstrap,
     isError,
@@ -302,6 +305,7 @@ export function DashboardShell() {
       {isSettingsOpen && (
         <SettingsModal userId={userId} onClose={() => setIsSettingsOpen(false)} />
       )}
+      <VoiceToastView toast={voiceToast} onDismiss={dismissVoiceToast} />
       {isError && (
         <p className="px-6 pb-2 text-xs text-red-400">
           Не удалось загрузить дашборд: {error?.message ?? 'неизвестная ошибка'}
