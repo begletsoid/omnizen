@@ -108,22 +108,45 @@ async function applyStartMicrotask(
 ): Promise<ApplyOutcome> {
   const p = payload as StartMicrotaskPayload;
 
-  // 1. Pause the currently running task (if any). The user's "previous
-  //    activity" gets closed out so the new one can take the floor cleanly.
+  // NOTE on RPC vs direct SQL:
+  // The existing pause_micro_task_timer / start_micro_task_timer / attach_
+  // categories_to_task RPCs are SECURITY DEFINER with internal `auth.uid()`
+  // ownership checks. Calling them with a service-role JWT yields auth.uid()
+  // = NULL, so every ownership predicate fails ("not found or not owned by
+  // user"). Service-role bypasses RLS but doesn't invent a user identity.
+  // Workaround: do the same updates with explicit user_id filters via the
+  // service-role client. Race-safe enough for one user (no concurrent voice
+  // commands in flight). Future fix: a *_as(p_task_id, p_user_id) variant
+  // of the RPCs that takes user_id as a parameter.
+
+  const nowIso = new Date().toISOString();
+
+  // 1. Pause the currently running task (if any).
   let pausedId: string | null = null;
   const { data: running, error: runningErr } = await supabase
     .from('micro_tasks')
-    .select('id')
+    .select('id, last_started_at, elapsed_seconds')
     .eq('user_id', ctx.userId)
     .eq('timer_state', 'running')
     .is('archived_at', null)
     .maybeSingle();
   if (runningErr) throw new Error(`running lookup: ${runningErr.message}`);
   if (running) {
-    const { error } = await supabase.rpc('pause_micro_task_timer', {
-      p_task_id: running.id,
-    });
-    if (error) throw new Error(`pause_micro_task_timer: ${error.message}`);
+    const startedAt = running.last_started_at as string | null;
+    const elapsedSeconds = Number(running.elapsed_seconds ?? 0);
+    const increment = startedAt
+      ? Math.max(0, Math.floor((Date.parse(nowIso) - Date.parse(startedAt)) / 1000))
+      : 0;
+    const { error: pauseErr } = await supabase
+      .from('micro_tasks')
+      .update({
+        timer_state: 'paused',
+        last_started_at: null,
+        elapsed_seconds: elapsedSeconds + increment,
+      })
+      .eq('id', running.id)
+      .eq('user_id', ctx.userId);
+    if (pauseErr) throw new Error(`pause running: ${pauseErr.message}`);
     pausedId = running.id;
   }
 
@@ -143,22 +166,40 @@ async function applyStartMicrotask(
     .single();
   if (insertErr) throw new Error(`micro_tasks insert: ${insertErr.message}`);
 
-  // 3. Attach categories (skip if empty — the LLM contract allows []).
+  // 3. Attach categories. Insert into the task_category_links join table
+  //    directly — the attach_categories_to_task RPC also has the auth.uid()
+  //    issue, and the join row needs no extra logic beyond (task_id, cat_id).
   if (p.category_ids.length > 0) {
-    const { error } = await supabase.rpc('attach_categories_to_task', {
-      p_task_id: created.id,
-      p_category_ids: p.category_ids,
-      p_user_id: ctx.userId,
-    });
-    if (error) throw new Error(`attach_categories: ${error.message}`);
+    const { data: ownedCategories, error: catLookupErr } = await supabase
+      .from('task_categories')
+      .select('id')
+      .eq('user_id', ctx.userId)
+      .in('id', p.category_ids);
+    if (catLookupErr) throw new Error(`category lookup: ${catLookupErr.message}`);
+    const validIds = (ownedCategories ?? []).map((c) => c.id as string);
+    if (validIds.length > 0) {
+      const links = validIds.map((category_id) => ({
+        task_id: created.id,
+        category_id,
+      }));
+      const { error: linkErr } = await supabase
+        .from('task_category_links')
+        .insert(links);
+      if (linkErr) throw new Error(`category link insert: ${linkErr.message}`);
+    }
   }
 
-  // 4. Start the timer. The RPC is idempotent re: pausing peers via the
-  //    partial unique index `timer_state='running'`.
-  const { error: startErr } = await supabase.rpc('start_micro_task_timer', {
-    p_task_id: created.id,
-  });
-  if (startErr) throw new Error(`start_micro_task_timer: ${startErr.message}`);
+  // 4. Start the timer on the new task. There can be no peer in 'running'
+  //    state at this point (we paused above), so we just flip our own row.
+  const { error: startErr } = await supabase
+    .from('micro_tasks')
+    .update({
+      timer_state: 'running',
+      last_started_at: nowIso,
+    })
+    .eq('id', created.id)
+    .eq('user_id', ctx.userId);
+  if (startErr) throw new Error(`start timer: ${startErr.message}`);
 
   return { applied_task_id: created.id, paused_task_id: pausedId };
 }

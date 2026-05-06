@@ -25,6 +25,12 @@ const HALLUCINATION_PATTERNS: ReadonlyArray<RegExp> = [
   /transcribed\s+by/i,
   /спасибо\s+за\s+просмотр/i,
   /субтитры/i,
+  // Whisper-large-v3-turbo loves emitting "Продолжение следует..." on
+  // silent audio (it's a YouTube cliffhanger phrase from training data).
+  /продолжение\s+следует/i,
+  /to\s+be\s+continued/i,
+  // "Поехали", "Поехали поехали" — another silence-on-cyrillic artefact.
+  /^поехали\s*[.…!]*$/i,
   /^♪+$/,
   /^\s*\.+\s*$/, // just dots
   /^(.{1,5})\s*\1\s*\1/, // same short word repeated 3+ times back-to-back

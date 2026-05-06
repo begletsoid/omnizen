@@ -17,6 +17,10 @@ describe('looksLikeHallucination', () => {
   it('rejects known Whisper noise patterns (Russian)', () => {
     expect(looksLikeHallucination('Спасибо за просмотр')).toBe(true);
     expect(looksLikeHallucination('Субтитры подготовлены сообществом')).toBe(true);
+    expect(looksLikeHallucination('Продолжение следует...')).toBe(true);
+    expect(looksLikeHallucination('Продолжение следует')).toBe(true);
+    expect(looksLikeHallucination('To be continued...')).toBe(true);
+    expect(looksLikeHallucination('Поехали')).toBe(true);
   });
 
   it('rejects musical-note glyph (recorded silence)', () => {
