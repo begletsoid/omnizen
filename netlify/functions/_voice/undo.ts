@@ -269,13 +269,13 @@ export async function applyUndoLast(
   if (!previous) {
     return {
       outcome: {},
-      summary: 'Нечего откатывать (предыдущая команда не найдена или старше 30 минут).',
+      summary: { title: 'Откат не выполнен', body: 'Нечего откатывать (старше 30 минут или уже откачено).' },
     };
   }
   if (previous.applied_intent === 'undo_last') {
     return {
       outcome: {},
-      summary: 'Нечего откатывать (предыдущая команда сама была откатом).',
+      summary: { title: 'Откат не выполнен', body: 'Предыдущая команда сама была откатом.' },
     };
   }
 
@@ -295,7 +295,7 @@ export async function applyUndoLast(
               applied_task_id: previous.applied_task_id,
               paused_task_id: previous.paused_task_id,
             },
-            summary: '',
+            summary: { title: '', body: '' },
           },
         ]
       : []);
@@ -303,7 +303,7 @@ export async function applyUndoLast(
   if (actions.length === 0) {
     return {
       outcome: {},
-      summary: 'Нечего откатывать (предыдущая команда не оставила следов).',
+      summary: { title: 'Откат не выполнен', body: 'Предыдущая команда не оставила следов.' },
     };
   }
 
@@ -315,6 +315,6 @@ export async function applyUndoLast(
   const outcome: ApplyOutcome = { undid_transcription_id: previous.id };
   return {
     outcome,
-    summary: `Откат: ${fragments.join(', ')}.`,
+    summary: { title: 'Откат', body: `${fragments.join(', ')}.` },
   };
 }

@@ -40,11 +40,12 @@ import {
 import { uploadAudio, downloadAudio } from './_voice/storage';
 import { transcribeAudio } from './_voice/stt';
 import { classifyVoice } from './_voice/llm';
-import { INTENT_REGISTRY } from './_voice/intents';
+import { INTENT_REGISTRY, summaryText } from './_voice/intents';
 import type {
   AppliedActionRecord,
   ApplyOutcome,
   LlmActionPlan,
+  SummaryPair,
   VoiceStatus,
   WebhookContext,
 } from './_voice/types';
@@ -56,6 +57,33 @@ function jsonResponse(status: number, body: Record<string, unknown>): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+/**
+ * Single canonical place where we decide what fields go into the JSON
+ * response so the iOS Shortcut can pick them with "Get Dictionary Value":
+ *
+ *   summary       — joined "Title. Body" string (legacy/in-app toast).
+ *   summary_title — short bold line for the iOS notification title.
+ *   summary_body  — detail line for the iOS notification body.
+ *
+ * For error states we synthesise a SummaryPair from the friendly title +
+ * the error_detail so the user sees something useful.
+ */
+function buildResponseBody(
+  rowId: string,
+  status: VoiceStatus,
+  summary: SummaryPair,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: rowId,
+    status,
+    summary: summaryText(summary),
+    summary_title: summary.title,
+    summary_body: summary.body,
+    ...extra,
+  };
 }
 
 /**
@@ -139,23 +167,26 @@ export default async function handler(req: Request): Promise<Response> {
     return null;
   });
   if (existing) {
-    return jsonResponse(200, {
-      id: existing.id,
-      status: existing.status,
-      summary: 'Уже обработано (повторный запрос).',
-      idempotent: true,
-    });
+    return jsonResponse(
+      200,
+      buildResponseBody(existing.id, existing.status, {
+        title: 'Дубликат',
+        body: 'Этот запрос уже обработан.',
+      }, { idempotent: true }),
+    );
   }
 
   // 4. Daily quota
   try {
     const used = await countTodayForUser(supabase, profile.id);
     if (used >= DAILY_QUOTA_PER_USER) {
-      return jsonResponse(429, {
-        status: 'error_quota',
-        summary: `Лимит на сегодня исчерпан (${DAILY_QUOTA_PER_USER}/день).`,
-        detail: `daily quota ${DAILY_QUOTA_PER_USER} reached`,
-      });
+      return jsonResponse(
+        429,
+        buildResponseBody('', 'error_quota', {
+          title: 'Лимит исчерпан',
+          body: `Сегодня уже было ${DAILY_QUOTA_PER_USER} запросов.`,
+        }, { detail: `daily quota ${DAILY_QUOTA_PER_USER} reached` }),
+      );
     }
   } catch (err) {
     console.warn('voice-webhook: quota check failed (non-fatal)', err);
@@ -185,16 +216,17 @@ export default async function handler(req: Request): Promise<Response> {
 
   const finishWith = async (
     status: VoiceStatus,
-    summary: string,
+    summary: SummaryPair,
     extras: Parameters<typeof updateRow>[2] = {},
   ) => {
+    const flat = summaryText(summary);
     await updateRow(supabase, rowId, {
       status,
       processed_at: new Date().toISOString(),
-      applied_summary: summary,
+      applied_summary: flat,
       ...extras,
     }).catch((err) => console.error('voice-webhook: final update failed', err));
-    return jsonResponse(200, { id: rowId, status, summary });
+    return jsonResponse(200, buildResponseBody(rowId, status, summary));
   };
 
   // 6. Transition: received → processing.
@@ -207,22 +239,33 @@ export default async function handler(req: Request): Promise<Response> {
   try {
     audioBlob = await downloadAudio(supabase, audioPath);
   } catch (err) {
-    return finishWith('error_stt', 'Не удалось прочитать аудио.', {
-      error_detail: `download: ${(err as Error).message}`,
-    });
+    return finishWith(
+      'error_stt',
+      { title: 'Ошибка', body: 'Не удалось прочитать аудио.' },
+      { error_detail: `download: ${(err as Error).message}` },
+    );
   }
   const stt = await transcribeAudio(audioBlob, audioDurationMs);
   if (!stt.ok) {
     if (stt.reason === 'hallucination') {
-      return finishWith('error_hallucination', 'Слышу только тишину — попробуй ещё.', {
-        raw_transcript: stt.transcript ?? null,
-        error_detail: stt.detail,
-      });
+      return finishWith(
+        'error_hallucination',
+        { title: 'Тишина', body: 'Не услышал речи — попробуй ещё.' },
+        { raw_transcript: stt.transcript ?? null, error_detail: stt.detail },
+      );
     }
     if (stt.reason === 'too_short_audio') {
-      return finishWith('error_stt', 'Запись слишком короткая.', { error_detail: stt.detail });
+      return finishWith(
+        'error_stt',
+        { title: 'Слишком коротко', body: 'Запись короче секунды.' },
+        { error_detail: stt.detail },
+      );
     }
-    return finishWith('error_stt', 'Не разобрал звук.', { error_detail: stt.detail });
+    return finishWith(
+      'error_stt',
+      { title: 'Ошибка распознавания', body: 'Не разобрал звук.' },
+      { error_detail: stt.detail },
+    );
   }
 
   // 8. LLM action plan
@@ -238,18 +281,20 @@ export default async function handler(req: Request): Promise<Response> {
     voiceIntentRules: profile.voice_intent_rules,
   });
   if (!llm.ok) {
-    return finishWith('error_llm', 'Не смог классифицировать команду.', {
-      raw_transcript: stt.transcript,
-      error_detail: llm.detail,
-    });
+    return finishWith(
+      'error_llm',
+      { title: 'Ошибка', body: 'Не смог классифицировать команду.' },
+      { raw_transcript: stt.transcript, error_detail: llm.detail },
+    );
   }
 
   const plan: LlmActionPlan = llm.plan;
   if (plan.actions.length === 0) {
-    return finishWith('error_llm', 'LLM не вернула ни одного действия.', {
-      raw_transcript: stt.transcript,
-      llm_output: plan,
-    });
+    return finishWith(
+      'error_llm',
+      { title: 'Ошибка', body: 'LLM не вернула ни одного действия.' },
+      { raw_transcript: stt.transcript, llm_output: plan },
+    );
   }
 
   // 9. Apply every action in order. If any step fails, stop and report
@@ -263,7 +308,7 @@ export default async function handler(req: Request): Promise<Response> {
     if (!spec) {
       return finishWith(
         'error_unknown_intent',
-        `Команда «${action.intent}» не поддерживается.`,
+        { title: 'Команда не поддерживается', body: `Intent «${action.intent}» неизвестен.` },
         {
           raw_transcript: stt.transcript,
           llm_output: plan,
@@ -277,12 +322,16 @@ export default async function handler(req: Request): Promise<Response> {
     try {
       validatedPayload = spec.validatePayload(action.payload);
     } catch (err) {
-      return finishWith('error_apply', 'Ошибка валидации payload\'а.', {
-        raw_transcript: stt.transcript,
-        llm_output: plan,
-        applied_actions: applied,
-        error_detail: `payload validation (${action.intent}): ${(err as Error).message}`,
-      });
+      return finishWith(
+        'error_apply',
+        { title: 'Ошибка', body: 'Неверный формат данных от LLM.' },
+        {
+          raw_transcript: stt.transcript,
+          llm_output: plan,
+          applied_actions: applied,
+          error_detail: `payload validation (${action.intent}): ${(err as Error).message}`,
+        },
+      );
     }
 
     try {
@@ -293,16 +342,20 @@ export default async function handler(req: Request): Promise<Response> {
         outcome: result.outcome,
         summary: result.summary,
       });
-      if (result.summary) summaryParts.push(result.summary);
+      summaryParts.push(result.summary);
     } catch (err) {
-      return finishWith('error_apply', 'Ошибка применения команды.', {
-        raw_transcript: stt.transcript,
-        llm_output: plan,
-        applied_actions: applied,
-        applied_intent: action.intent,
-        applied_payload: validatedPayload,
-        error_detail: (err as Error).message,
-      });
+      return finishWith(
+        'error_apply',
+        { title: 'Ошибка применения', body: (err as Error).message.slice(0, 100) },
+        {
+          raw_transcript: stt.transcript,
+          llm_output: plan,
+          applied_actions: applied,
+          applied_intent: action.intent,
+          applied_payload: validatedPayload,
+          error_detail: (err as Error).message,
+        },
+      );
     }
   }
 
@@ -310,10 +363,19 @@ export default async function handler(req: Request): Promise<Response> {
   //     legacy applied_task_id / paused_task_id / undid_transcription_id
   //     columns so existing readers (Realtime hook, History UI) work
   //     without changes.
+  //
+  //     For chained commands (e.g. undo + create), join titles with " + "
+  //     and bodies with " · " so the iOS notification shows compact info
+  //     on two lines. Single-action commands just use the action's pair.
   const rolled = rollupOutcome(applied.map((a) => a.outcome));
-  const summary = summaryParts.join(' + ');
+  const finalSummary: SummaryPair = applied.length === 1
+    ? applied[0].summary
+    : {
+        title: applied.map((a) => a.summary.title).filter(Boolean).join(' + '),
+        body: applied.map((a) => a.summary.body).filter(Boolean).join(' · '),
+      };
   const firstAction = applied[0];
-  return finishWith('applied', summary, {
+  return finishWith('applied', finalSummary, {
     raw_transcript: stt.transcript,
     llm_output: plan,
     applied_intent: firstAction?.intent ?? null,

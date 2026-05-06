@@ -23,44 +23,80 @@ type ToastKind = 'applied' | 'error';
 export type VoiceToast = {
   id: string;
   kind: ToastKind;
+  /** Bold title line (mirrors iOS notification title). */
   text: string;
-  /** Sub-text shown below the main text (e.g. error_detail). */
+  /** Optional body line shown below the title (mirrors iOS body). */
   detail?: string | null;
 };
 
 const TOAST_TTL_MS = 4000;
 
-function summariseTitle(row: VoiceTranscriptionRow): string {
-  // Phase 2: prefer the server-built summary verbatim — it's already the
-  // user-facing string ("Создана задача «X». Таймер запущен.").
-  if (typeof row.applied_summary === 'string' && row.applied_summary.length > 0) {
-    return row.applied_summary;
+/**
+ * Pull the structured {title, body} pair from the row. Sources tried in
+ * order: applied_actions[].summary (multi-action chains aggregated),
+ * applied_summary string parsed back into title/body, or a synthesised
+ * fallback for legacy phase-1 rows.
+ */
+function extractTitleBody(row: VoiceTranscriptionRow): { title: string; body: string } {
+  // Preferred: structured per-action summaries from applied_actions.
+  if (Array.isArray(row.applied_actions) && row.applied_actions.length > 0) {
+    const titles: string[] = [];
+    const bodies: string[] = [];
+    for (const action of row.applied_actions) {
+      const s = (action as { summary?: unknown }).summary;
+      if (s && typeof s === 'object') {
+        const t = (s as { title?: unknown }).title;
+        const b = (s as { body?: unknown }).body;
+        if (typeof t === 'string' && t.length > 0) titles.push(t);
+        if (typeof b === 'string' && b.length > 0) bodies.push(b);
+      }
+    }
+    if (titles.length > 0) {
+      return { title: titles.join(' + '), body: bodies.join(' · ') };
+    }
   }
-  // Backward-compat with phase 1 rows that don't have applied_summary yet.
+  // Fallback: split applied_summary on the server's "Title. Body" join.
+  if (typeof row.applied_summary === 'string' && row.applied_summary.length > 0) {
+    const idx = row.applied_summary.indexOf('. ');
+    if (idx > 0) {
+      return {
+        title: row.applied_summary.slice(0, idx),
+        body: row.applied_summary.slice(idx + 2),
+      };
+    }
+    return { title: row.applied_summary, body: '' };
+  }
+  // Legacy phase-1 fallback.
   const payload = row.applied_payload;
   if (payload && typeof payload === 'object' && 'new_task_title' in payload) {
     const title = (payload as { new_task_title?: unknown }).new_task_title;
-    if (typeof title === 'string') return `Голос: «${title}» запущена`;
+    if (typeof title === 'string') {
+      return { title: 'Создана задача', body: `«${title}». Таймер запущен.` };
+    }
   }
-  if (row.raw_transcript) return `Голос: ${row.raw_transcript.slice(0, 80)}`;
-  return 'Голос: команда применена';
+  if (row.raw_transcript) {
+    return { title: 'Голос', body: row.raw_transcript.slice(0, 80) };
+  }
+  return { title: 'Голос', body: 'команда применена' };
 }
 
 function statusToToast(row: VoiceTranscriptionRow): VoiceToast | null {
   if (row.status === 'applied') {
-    return { id: row.id, kind: 'applied', text: summariseTitle(row) };
+    const { title, body } = extractTitleBody(row);
+    return { id: row.id, kind: 'applied', text: title, detail: body || null };
   }
-  // Error variants: prefer the server's applied_summary (which now also
-  // gets populated for errors with a friendly message), fall back to the
-  // canonical title per status.
-  if (typeof row.applied_summary === 'string' && row.applied_summary.length > 0) {
+  // Error variants: same extraction logic — applied_summary on errors is
+  // populated by the webhook with a friendly title/body pair.
+  const { title, body } = extractTitleBody(row);
+  if (title) {
     return {
       id: row.id,
       kind: 'error',
-      text: row.applied_summary,
-      detail: row.error_detail ?? null,
+      text: title,
+      detail: body || row.error_detail || null,
     };
   }
+  // Last-resort canonical map.
   const errorTitles: Record<string, string> = {
     error_stt: 'Не разобрал звук',
     error_llm: 'Не смог классифицировать',
@@ -69,14 +105,9 @@ function statusToToast(row: VoiceTranscriptionRow): VoiceToast | null {
     error_quota: 'Лимит на сегодня исчерпан',
     error_unknown_intent: 'Команда не поддерживается',
   };
-  const title = errorTitles[row.status];
-  if (!title) return null;
-  return {
-    id: row.id,
-    kind: 'error',
-    text: title,
-    detail: row.error_detail ?? null,
-  };
+  const fallback = errorTitles[row.status];
+  if (!fallback) return null;
+  return { id: row.id, kind: 'error', text: fallback, detail: row.error_detail ?? null };
 }
 
 export function useVoiceRealtime(userId: string | null) {

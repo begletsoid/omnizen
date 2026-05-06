@@ -23,8 +23,19 @@ import type {
   ApplyResult,
   PauseCurrentPayload,
   StartMicrotaskPayload,
+  SummaryPair,
   WebhookContext,
 } from './types';
+
+/**
+ * Build the single-line "Title. Body" representation used for in-app toasts
+ * and the legacy `applied_summary` text column. Punctuates so the body
+ * doesn't look chopped after the title.
+ */
+export function summaryText(pair: SummaryPair): string {
+  if (!pair.body) return pair.title;
+  return `${pair.title}. ${pair.body}`;
+}
 
 export type IntentSpec = {
   /** Human-readable summary used in the LLM system prompt. */
@@ -173,7 +184,7 @@ async function applyStartMicrotask(
     if (target.timer_state === 'running') {
       return {
         outcome: { applied_task_id: target.id as string },
-        summary: `«${target.title}» уже идёт`,
+        summary: { title: 'Уже идёт', body: `«${target.title}»` },
       };
     }
 
@@ -188,7 +199,7 @@ async function applyStartMicrotask(
 
     return {
       outcome: { applied_task_id: target.id as string, paused_task_id: pausedId },
-      summary: `Возобновлена «${target.title}». Таймер запущен.`,
+      summary: { title: 'Возобновлена', body: `«${target.title}». Таймер запущен.` },
     };
   }
 
@@ -236,10 +247,13 @@ async function applyStartMicrotask(
     .eq('user_id', ctx.userId);
   if (startErr) throw new Error(`start timer: ${startErr.message}`);
 
-  const goalSuffix = p.goal_id ? ' (привязана к цели)' : '';
+  const goalSuffix = p.goal_id ? ', привязана к цели' : '';
   return {
     outcome: { applied_task_id: created.id as string, paused_task_id: pausedId },
-    summary: `Создана задача «${created.title}»${goalSuffix}. Таймер запущен.`,
+    summary: {
+      title: 'Создана задача',
+      body: `«${created.title}»${goalSuffix}. Таймер запущен.`,
+    },
   };
 }
 
@@ -266,11 +280,11 @@ async function applyPauseCurrent(
     .maybeSingle();
   if (lookupErr) throw new Error(`running lookup: ${lookupErr.message}`);
   if (!running) {
-    return { outcome: {}, summary: 'Активной задачи нет.' };
+    return { outcome: {}, summary: { title: 'Пауза', body: 'Активной задачи не было.' } };
   }
   const pausedId = await pauseRunningTask(supabase, ctx.userId);
   if (!pausedId) {
-    return { outcome: {}, summary: 'Активной задачи нет.' };
+    return { outcome: {}, summary: { title: 'Пауза', body: 'Активной задачи не было.' } };
   }
   // Compute total elapsed for the human summary (including the just-added increment).
   const startedAt = running.last_started_at as string | null;
@@ -284,7 +298,10 @@ async function applyPauseCurrent(
   const elapsedHuman = minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
   return {
     outcome: { paused_task_id: pausedId },
-    summary: `Поставил «${running.title}» на паузу (на счётчике ${elapsedHuman}).`,
+    summary: {
+      title: 'Пауза',
+      body: `«${running.title}» (на счётчике ${elapsedHuman}).`,
+    },
   };
 }
 
@@ -380,14 +397,16 @@ async function applyAddGoal(
     .single();
   if (insertErr) throw new Error(`goals insert: ${insertErr.message}`);
 
-  // Format an informative summary noting any optional fields that were set.
-  const parts: string[] = [`Создана цель «${created.title}»`];
-  if (p.expected_hours !== null) parts.push(`${p.expected_hours} ч`);
-  if (p.value !== null) parts.push(`${p.value} баллов`);
+  // Body — title in quotes plus optional value/hours suffix.
+  const meta: string[] = [];
+  if (p.expected_hours !== null) meta.push(`${p.expected_hours} ч`);
+  if (p.value !== null) meta.push(`${p.value} баллов`);
+  const body = meta.length > 0
+    ? `«${created.title}» (${meta.join(', ')}).`
+    : `«${created.title}».`;
   return {
     outcome: { applied_goal_id: created.id as string },
-    summary:
-      parts.length === 1 ? `${parts[0]}.` : `${parts[0]} (${parts.slice(1).join(', ')}).`,
+    summary: { title: 'Создана цель', body },
   };
 }
 

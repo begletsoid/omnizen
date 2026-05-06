@@ -109,22 +109,35 @@ export type ApplyOutcome = {
 };
 
 /**
+ * Two-line human summary so the iOS push notification can render a bold
+ * `title` line plus a regular `body` line. Title is short ("Создана задача",
+ * "Возобновлена", "Пауза"), body has the specifics ("«X». 5 мин."). The
+ * `text` field is the joined "Title. Body" representation used everywhere
+ * we still need a single string (in-app toast, history list, debug logs).
+ */
+export type SummaryPair = {
+  title: string;
+  body: string;
+};
+
+/**
  * What every IntentSpec.apply must return: the outcome bookkeeping plus a
- * one-line human-readable description for the summary.
+ * structured summary for the notification.
  */
 export type ApplyResult = {
   outcome: ApplyOutcome;
-  summary: string;
+  summary: SummaryPair;
 };
 
 /**
  * Persisted shape of a single applied action inside `applied_actions` jsonb.
  * Preserves the intent name, the payload that was actually applied (already
- * validated, post-LLM), and the outcome.
+ * validated, post-LLM), and the outcome. Phase 2.1: summary is the
+ * structured {title, body} pair.
  */
 export type AppliedActionRecord = {
   intent: string;
   payload: Record<string, unknown>;
   outcome: ApplyOutcome;
-  summary: string;
+  summary: SummaryPair;
 };
