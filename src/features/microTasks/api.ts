@@ -319,7 +319,7 @@ export async function createTaskCategory(name: string, userId: string) {
 
 export async function updateTaskCategoryAttributes(
   categoryId: string,
-  payload: Partial<Pick<TaskCategory, 'name' | 'color'>>,
+  payload: Partial<Pick<TaskCategory, 'name' | 'color' | 'description'>>,
   userId: string,
 ) {
   const client = requireSupabase();

@@ -75,6 +75,7 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useSetTaskCategoryBuffer: () => setCategoryBufferMutation,
   useTaskCategoryBuffer: () => ({ data: [] }),
   useUpdateTaskCategoryColor: () => updateCategoryColorMutation,
+  useUpdateTaskCategoryDescription: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
 }));
 
 describe('Micro task taxonomy', () => {

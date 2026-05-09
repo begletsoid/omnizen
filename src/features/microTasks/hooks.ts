@@ -840,6 +840,52 @@ export function useUpdateTaskCategoryColor() {
   });
 }
 
+/**
+ * Mirror of useUpdateTaskCategoryColor but for the description column.
+ * Description has no fan-out into micro_tasks rows (unlike color, which is
+ * embedded into MicroTaskRecord.categories[]) — it's stored only on
+ * task_categories itself, so the optimistic update path is simpler.
+ */
+export function useUpdateTaskCategoryDescription() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      description,
+    }: {
+      id: string;
+      description: string | null;
+    }) => {
+      if (!user) throw new Error('User not authenticated');
+      return updateTaskCategoryAttributes(id, { description }, user.id);
+    },
+    onMutate: async ({ id, description }) => {
+      await queryClient.cancelQueries({ queryKey: ['taskCategories', user?.id] });
+      const prevCategories = queryClient.getQueryData<TaskCategory[]>([
+        'taskCategories',
+        user?.id,
+      ]);
+      queryClient.setQueryData<TaskCategory[]>(
+        ['taskCategories', user?.id],
+        (old) =>
+          old?.map((category) =>
+            category.id === id ? { ...category, description } : category,
+          ) ?? [],
+      );
+      return { prevCategories };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.prevCategories) {
+        queryClient.setQueryData(['taskCategories', user?.id], context.prevCategories);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskCategories', user?.id] });
+    },
+  });
+}
+
 export function useDeleteTaskCategory() {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();

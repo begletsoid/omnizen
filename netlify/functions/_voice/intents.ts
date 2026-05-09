@@ -85,6 +85,30 @@ function validateStartMicrotask(raw: unknown): StartMicrotaskPayload {
   return { mode, resume_task_id, new_task_title, goal_id, category_ids };
 }
 
+/**
+ * Load the categories attached to a goal via `goal_category_links`. Mirrors
+ * the source-of-truth used by the goal→micro-task drag-drop (see
+ * src/widgets/microTasks/MicroTasksWidget.tsx:213-218 and the goal SELECT
+ * in src/features/tasks/api.ts:23). Returns the user's own category UUIDs
+ * (the user_id filter is enforced through goals — RLS on goal_category_links
+ * itself trusts the goals row's owner).
+ */
+async function getGoalCategoryIds(
+  supabase: SupabaseClient,
+  userId: string,
+  goalId: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('goal_category_links')
+    .select('category_id, goals!inner(user_id)')
+    .eq('goal_id', goalId)
+    .eq('goals.user_id', userId);
+  if (error) throw new Error(`goal categories lookup: ${error.message}`);
+  return (data ?? [])
+    .map((row) => (row as { category_id?: string }).category_id)
+    .filter((id): id is string => typeof id === 'string');
+}
+
 async function resolveTargetTasksWidget(
   supabase: SupabaseClient,
   ctx: WebhookContext,
@@ -220,12 +244,23 @@ async function applyStartMicrotask(
     .single();
   if (insertErr) throw new Error(`micro_tasks insert: ${insertErr.message}`);
 
-  if (p.category_ids.length > 0) {
+  // Categories: when the new task is linked to a goal, INHERIT that goal's
+  // categories rather than trusting the LLM's category_ids. Mirrors the
+  // drag-drop behaviour at src/widgets/microTasks/MicroTasksWidget.tsx:213-218
+  // (`goalCategoryIds = goal.categories?.map(c => c.id) ?? []`) so voice and
+  // UI stay aligned. The LLM is explicitly told (in buildSystemPrompt rule
+  // 5a) to leave category_ids=[] when goal_id is set, but we belt-and-braces
+  // override here in case it forgets.
+  const categoryIds = p.goal_id
+    ? await getGoalCategoryIds(supabase, ctx.userId, p.goal_id)
+    : p.category_ids;
+
+  if (categoryIds.length > 0) {
     const { data: ownedCategories, error: catLookupErr } = await supabase
       .from('task_categories')
       .select('id')
       .eq('user_id', ctx.userId)
-      .in('id', p.category_ids);
+      .in('id', categoryIds);
     if (catLookupErr) throw new Error(`category lookup: ${catLookupErr.message}`);
     const validIds = (ownedCategories ?? []).map((c) => c.id as string);
     if (validIds.length > 0) {

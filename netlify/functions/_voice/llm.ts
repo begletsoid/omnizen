@@ -30,7 +30,19 @@ const OPENAI_MODEL = 'gpt-4o-mini';
 export type LlmContext = {
   goals: Array<{ id: string; title: string }>;
   recent_tasks: Array<{ id: string; title: string; category_names: string[] }>;
-  categories: Array<{ id: string; name: string }>;
+  categories: Array<{
+    id: string;
+    name: string;
+    /** User-written hint about what falls into this category. Null when blank. */
+    description: string | null;
+    /** True if the category mirrors a tag (auto-generated). User-created ones
+     *  carry stronger semantic intent and are preferred at equal match. */
+    is_auto: boolean;
+    /** Names of tags linked to this category — keyword evidence the LLM uses. */
+    tag_names: string[];
+  }>;
+  /** UUIDs from task_category_buffers.category_ids — user's typical default set. */
+  recent_buffer: string[];
 };
 
 /**
@@ -44,7 +56,7 @@ export async function loadLlmContext(
 ): Promise<LlmContext> {
   const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [goalsRes, tasksRes, categoriesRes] = await Promise.all([
+  const [goalsRes, tasksRes, categoriesRes, bufferRes] = await Promise.all([
     supabase
       .from('goals')
       .select('id, title')
@@ -65,16 +77,28 @@ export async function loadLlmContext(
       .gte('created_at', fourteenDaysAgo)
       .order('created_at', { ascending: false })
       .limit(30),
+    // Phase 3: include description + is_auto + linked tags. The JOIN through
+    // category_tags → task_tags pulls every tag's name so the LLM sees the
+    // category's keyword footprint (e.g. {name: "Работа", tag_names: ["pr",
+    // "review", "code"]}). Single round-trip via PostgREST embed.
     supabase
       .from('task_categories')
-      .select('id, name')
+      .select(
+        'id, name, description, is_auto, category_tags(task_tags(name))',
+      )
       .eq('user_id', userId)
       .order('name', { ascending: true }),
+    supabase
+      .from('task_category_buffers')
+      .select('category_ids')
+      .eq('user_id', userId)
+      .maybeSingle(),
   ]);
 
   if (goalsRes.error) throw new Error(`goals: ${goalsRes.error.message}`);
   if (tasksRes.error) throw new Error(`tasks: ${tasksRes.error.message}`);
   if (categoriesRes.error) throw new Error(`categories: ${categoriesRes.error.message}`);
+  if (bufferRes.error) throw new Error(`buffer: ${bufferRes.error.message}`);
 
   const recent_tasks = (tasksRes.data ?? []).map((row) => {
     const links = (row as { task_category_links?: Array<{ task_categories?: { name?: string } }> })
@@ -85,10 +109,35 @@ export async function loadLlmContext(
     return { id: row.id as string, title: row.title as string, category_names };
   });
 
+  const categories = (categoriesRes.data ?? []).map((row) => {
+    const r = row as {
+      id: string;
+      name: string;
+      description: string | null;
+      is_auto: boolean;
+      category_tags?: Array<{ task_tags?: { name?: string } }>;
+    };
+    const tag_names = (r.category_tags ?? [])
+      .map((ct) => ct.task_tags?.name)
+      .filter((n): n is string => typeof n === 'string');
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description ?? null,
+      is_auto: Boolean(r.is_auto),
+      tag_names,
+    };
+  });
+
+  const recent_buffer = Array.isArray(bufferRes.data?.category_ids)
+    ? (bufferRes.data!.category_ids as string[])
+    : [];
+
   return {
     goals: (goalsRes.data ?? []) as Array<{ id: string; title: string }>,
     recent_tasks,
-    categories: (categoriesRes.data ?? []) as Array<{ id: string; name: string }>,
+    categories,
+    recent_buffer,
   };
 }
 
@@ -110,6 +159,7 @@ export function buildSystemPrompt(
   const goalsJson = JSON.stringify(context.goals);
   const tasksJson = JSON.stringify(context.recent_tasks);
   const categoriesJson = JSON.stringify(context.categories);
+  const recentBufferJson = JSON.stringify(context.recent_buffer);
 
   return `Ты помощник, который превращает голосовую заметку пользователя в план команд (actions) для дашборда.
 
@@ -120,6 +170,14 @@ ${intentSection}${rulesHint}
 ОТКРЫТЫЕ_ЦЕЛИ: ${goalsJson}
 НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ (не done, не archived, последние 14 дней): ${tasksJson}
 ДОСТУПНЫЕ_КАТЕГОРИИ: ${categoriesJson}
+  // Каждая запись содержит:
+  //   id           — UUID для использования в category_ids.
+  //   name         — отображаемое имя.
+  //   description  — что попадает в категорию (null если не заполнено).
+  //   tag_names    — связанные ключевые слова из тегов.
+  //   is_auto      — true означает category-автодвойник тега, чуть менее семантичный.
+ОБЫЧНЫЙ_НАБОР_КАТЕГОРИЙ_ПОЛЬЗОВАТЕЛЯ: ${recentBufferJson}
+  // UUID-ы категорий, которые юзер выбирает чаще всего. Используй как дефолт когда фраза неоднозначна.
 
 ОТВЕТЬ СТРОГО JSON В ФОРМАТЕ:
 {
@@ -138,10 +196,17 @@ ${intentSection}${rulesHint}
 4. **Find-or-create для start_microtask:**
    - Сначала проверь НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ. Если есть задача с очень похожим по смыслу названием — ставь mode="resume", resume_task_id = её UUID, остальные поля null/[].
    - Иначе mode="create", new_task_title = нормализованное название, и если фраза явно про какую-то ОТКРЫТУЮ_ЦЕЛЬ — выставь её UUID в goal_id.
-   - category_ids: 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ, подходящие по смыслу. Никогда не выдумывай UUID, не указывай те которых нет в списке.
-5. **Парсинг add_goal:** "добавь цель X цена N время N часов" — title=X, value=N (если "цена"), expected_hours=N (если "время"). value/expected_hours = null если не упомянуты.
-6. **Никаких UUID, которых нет в КОНТЕКСТЕ.** Все UUID — строго из ОТКРЫТЫЕ_ЦЕЛИ / НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ / ДОСТУПНЫЕ_КАТЕГОРИИ или null.
-7. **Никакого текста кроме JSON.** Никаких \`\`\` обёрток.`;
+5. **Категоризация (mode="create"):**
+   a. Если в payload стоит goal_id — категории НЕ выбирай сам, оставляй category_ids=[]. Сервер автоматически унаследует категории цели.
+   b. Если goal_id=null — выбирай 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ по смыслу:
+      - Сначала смотри на description: если фраза про что-то описанное в категории (например description «приёмы пищи, обед, ужин» → подходит для «Обед») — это сильный сигнал.
+      - Затем на tag_names: совпадение слов из фразы с тегами категории — тоже сильный сигнал.
+      - При равном совпадении предпочитай is_auto=false (созданные пользователем сильнее, чем category-автодвойники тегов).
+      - Если не нашлось явных совпадений и фраза неоднозначна — используй ОБЫЧНЫЙ_НАБОР_КАТЕГОРИЙ_ПОЛЬЗОВАТЕЛЯ как дефолт.
+   c. Если у пользователя нет ни описаний, ни тегов, ни buffer — лучше вернуть category_ids=[] чем выдумывать.
+6. **Парсинг add_goal:** "добавь цель X цена N время N часов" — title=X, value=N (если "цена"), expected_hours=N (если "время"). value/expected_hours = null если не упомянуты.
+7. **Никаких UUID, которых нет в КОНТЕКСТЕ.** Все UUID — строго из ОТКРЫТЫЕ_ЦЕЛИ / НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ / ДОСТУПНЫЕ_КАТЕГОРИИ или null.
+8. **Никакого текста кроме JSON.** Никаких \`\`\` обёрток.`;
 }
 
 function extractJson(text: string): unknown {

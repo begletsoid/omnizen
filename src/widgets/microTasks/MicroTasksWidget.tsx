@@ -49,6 +49,7 @@ import {
   useTransferMicroTaskTime,
   useUpdateMicroTask,
   useUpdateTaskCategoryColor,
+  useUpdateTaskCategoryDescription,
 } from '../../features/microTasks/hooks';
 import type {
   MicroTaskGroup,
@@ -222,6 +223,7 @@ export function MicroTasksWidget({
     return () => window.removeEventListener('cross-widget-drop', handler);
   }, [widgetId, createTask]);
   const updateCategoryColor = useUpdateTaskCategoryColor();
+  const updateCategoryDescription = useUpdateTaskCategoryDescription();
 
   const [optimisticRunningId, setOptimisticRunningId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -1241,21 +1243,32 @@ export function MicroTasksWidget({
         </FloatingPortal>
       )}
 
-      {/* Category Color Menu */}
+      {/* Category Color + Description Menu */}
       {colorMenuCategory && colorMenuPosition && (
         <FloatingPortal>
-          <div ref={colorMenuRef} className="fixed z-[2000] w-40 rounded-2xl border border-white/10 bg-background/95 p-3 text-[0.65rem] text-text shadow-2xl backdrop-blur"
+          <div ref={colorMenuRef} className="fixed z-[2000] w-72 rounded-2xl border border-white/10 bg-background/95 p-3 text-[0.65rem] text-text shadow-2xl backdrop-blur"
             style={{ top: colorMenuPosition.y, left: colorMenuPosition.x }}>
             <p className="px-1 text-[0.55rem] uppercase tracking-[0.2em] text-muted">Цвет</p>
-            <div className="mt-2 grid grid-cols-3 gap-2">
+            <div className="mt-2 grid grid-cols-7 gap-2">
               {CATEGORY_COLOR_PRESETS.map((preset) => (
                 <button key={preset.id} type="button" onClick={() => handleSelectCategoryColor(colorMenuCategory.id, preset.id === 'neutral' ? null : preset.id)}
-                  className={clsx('flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 transition hover:border-white/30', colorMenuCategory.color === preset.id && 'ring-2 ring-accent/40')}
+                  className={clsx('flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 transition hover:border-white/30', colorMenuCategory.color === preset.id && 'ring-2 ring-accent/40')}
                   aria-label={`Цвет: ${preset.label}`}>
                   <TagIcon className={clsx('h-4 w-4', preset.iconClass)} />
                 </button>
               ))}
             </div>
+            <p className="mt-3 px-1 text-[0.55rem] uppercase tracking-[0.2em] text-muted">Описание</p>
+            <CategoryDescriptionEditor
+              key={colorMenuCategory.id}
+              initial={colorMenuCategory.description ?? ''}
+              onSave={(value) => {
+                const trimmed = value.trim();
+                const next = trimmed.length > 0 ? trimmed : null;
+                if (next === (colorMenuCategory.description ?? null)) return;
+                updateCategoryDescription.mutate({ id: colorMenuCategory.id, description: next });
+              }}
+            />
           </div>
         </FloatingPortal>
       )}
@@ -1470,5 +1483,71 @@ export function MicroTasksWidget({
         />
       )}
     </section>
+  );
+}
+
+/**
+ * Description textarea with focus-based expand/collapse.
+ *
+ *  - Collapsed (not focused): single visible row, content truncated with overflow:hidden.
+ *  - Focused: auto-resizes between 1 and 4 rows based on content length.
+ *  - Saves on blur (only if value changed) — debounced via parent's `onSave`.
+ *
+ * Why a local component (not a shared one): used in exactly one place
+ * (the category color popover), and the auto-resize behaviour is tightly
+ * coupled to the popover's width. Lifting it would just add export ceremony.
+ */
+function CategoryDescriptionEditor({
+  initial,
+  onSave,
+}: {
+  initial: string;
+  onSave: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const [focused, setFocused] = useState(false);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+
+  // Sync external initial → local draft when the popover switches to a
+  // different category (parent re-mounts via key={category.id}, so this
+  // effect just covers the rare same-category external update case).
+  useEffect(() => {
+    setDraft(initial);
+  }, [initial]);
+
+  // Auto-resize: when focused or content changes, snap height to scrollHeight
+  // capped at 4 lines. When unfocused, force back to single-row height so the
+  // popover stays compact.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const computedStyle = window.getComputedStyle(el);
+    const lineHeight = parseFloat(computedStyle.lineHeight) || 16;
+    const verticalPad =
+      parseFloat(computedStyle.paddingTop) + parseFloat(computedStyle.paddingBottom);
+    if (focused) {
+      // Reset to auto first to get an accurate scrollHeight measurement.
+      el.style.height = 'auto';
+      const max = lineHeight * 4 + verticalPad;
+      el.style.height = `${Math.min(max, el.scrollHeight)}px`;
+    } else {
+      el.style.height = `${lineHeight + verticalPad}px`;
+    }
+  }, [focused, draft]);
+
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      value={draft}
+      placeholder="Опиши, что попадает в эту категорию (помогает голосовой команде)"
+      onChange={(e) => setDraft(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        if (draft !== initial) onSave(draft);
+      }}
+      className="mt-1 w-full resize-none overflow-hidden rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[0.7rem] leading-tight text-text outline-none transition focus:border-white/30"
+    />
   );
 }

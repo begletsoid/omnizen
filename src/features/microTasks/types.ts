@@ -64,6 +64,13 @@ export type TaskCategory = {
   name: string;
   is_auto: boolean;
   color?: string | null;
+  /**
+   * User-written hint that explains what falls into this category.
+   * Surfaced in the voice pipeline's LLM prompt so it can classify new
+   * micro-tasks into the right category by meaning, not just by name.
+   * NULL when the user hasn't filled it in yet.
+   */
+  description?: string | null;
   source_tag_id?: string | null;
   created_at: string;
   updated_at: string;
