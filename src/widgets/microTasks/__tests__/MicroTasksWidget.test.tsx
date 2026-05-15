@@ -56,6 +56,11 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useDetachTagFromCategory: createMutationMock,
   useUpdateTaskCategoryColor: () => updateCategoryColorMock,
   useUpdateTaskCategoryDescription: createMutationMock,
+  useArchiveTaskCategory: createMutationMock,
+  useUnarchiveTaskCategory: createMutationMock,
+  useArchiveTaskTag: createMutationMock,
+  useUnarchiveTaskTag: createMutationMock,
+  useAcknowledgeCategoriesIntroduction: createMutationMock,
 }));
 
 let dndContextCallCount = 0;

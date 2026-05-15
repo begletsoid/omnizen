@@ -280,6 +280,41 @@ export async function deleteTaskTag(tagId: string, userId: string) {
   if (error) throw error;
 }
 
+/**
+ * Soft-archive a tag. Also cascades to the tag's auto-generated category
+ * (category.source_tag_id = tag.id) so the LLM doesn't keep seeing the
+ * orphaned auto-category in its context. Manual unarchive of either
+ * surface flips that side independently — no auto-cascade on restore.
+ */
+export async function archiveTaskTag(tagId: string, userId: string) {
+  const client = requireSupabase();
+  const now = new Date().toISOString();
+  const { error } = await client
+    .from('task_tags')
+    .update({ archived_at: now })
+    .eq('id', tagId)
+    .eq('user_id', userId);
+  if (error) throw error;
+  // Cascade to auto-category if present.
+  const { error: catErr } = await client
+    .from('task_categories')
+    .update({ archived_at: now })
+    .eq('source_tag_id', tagId)
+    .eq('user_id', userId)
+    .is('archived_at', null);
+  if (catErr) throw catErr;
+}
+
+export async function unarchiveTaskTag(tagId: string, userId: string) {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('task_tags')
+    .update({ archived_at: null })
+    .eq('id', tagId)
+    .eq('user_id', userId);
+  if (error) throw error;
+}
+
 export async function listTaskCategories(userId: string) {
   const client = requireSupabase();
   const { data, error } = await client
@@ -344,6 +379,26 @@ export async function deleteTaskCategory(categoryId: string, userId: string) {
   if (error) throw error;
 }
 
+export async function archiveTaskCategory(categoryId: string, userId: string) {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('task_categories')
+    .update({ archived_at: new Date().toISOString() })
+    .eq('id', categoryId)
+    .eq('user_id', userId);
+  if (error) throw error;
+}
+
+export async function unarchiveTaskCategory(categoryId: string, userId: string) {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('task_categories')
+    .update({ archived_at: null })
+    .eq('id', categoryId)
+    .eq('user_id', userId);
+  if (error) throw error;
+}
+
 export async function attachTagToCategory(categoryId: string, tagId: string, userId: string) {
   const client = requireSupabase();
   const { error } = await client.rpc('attach_tag_to_category', {
@@ -402,6 +457,65 @@ export async function detachCategoryFromTask(taskId: string, categoryId: string,
     p_category_id: categoryId,
     p_user_id: userId,
   });
+  if (error) throw error;
+}
+
+/**
+ * Ask the server-side LLM to pick 0..1 categories for a manually-typed
+ * micro-task title. Used by useCreateMicroTask before falling back to the
+ * task_category_buffers default. Returns an empty array on any failure —
+ * the caller treats "no auto-pick" as a signal to use the buffer.
+ *
+ * Endpoint: netlify/functions/classify-microtask.ts. Auth via the user's
+ * current Supabase access token (same one supabase-js uses for all
+ * client-side queries).
+ */
+export async function classifyMicrotaskCategories(title: string): Promise<string[]> {
+  const client = requireSupabase();
+  const { data: sessionRes } = await client.auth.getSession();
+  const token = sessionRes.session?.access_token;
+  if (!token) return [];
+  const trimmed = title.trim();
+  if (!trimmed) return [];
+
+  try {
+    const response = await fetch('/api/classify-microtask', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: trimmed }),
+    });
+    if (!response.ok) {
+      // 4xx/5xx — caller falls back to buffer.
+      return [];
+    }
+    const json = (await response.json()) as { category_ids?: unknown };
+    if (!Array.isArray(json.category_ids)) return [];
+    return json.category_ids.filter((id): id is string => typeof id === 'string');
+  } catch {
+    // Network failure / parse failure — caller falls back to buffer.
+    return [];
+  }
+}
+
+/**
+ * Mark the "categories introduced" preview as seen for a given task. Once
+ * any device sets this timestamp, no other device will replay the chip
+ * preview — that's the single-show-across-devices guarantee.
+ */
+export async function acknowledgeCategoriesIntroduction(
+  taskId: string,
+  userId: string,
+): Promise<void> {
+  const client = requireSupabase();
+  const { error } = await client
+    .from('micro_tasks')
+    .update({ categories_introduced_at: new Date().toISOString() })
+    .eq('id', taskId)
+    .eq('user_id', userId)
+    .is('categories_introduced_at', null); // only first acknowledge wins
   if (error) throw error;
 }
 

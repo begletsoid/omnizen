@@ -13,6 +13,13 @@ export type MicroTaskRecord = {
   timer_state: MicroTaskTimerState;
   last_started_at: string | null;
   archived_at: string | null;
+  /**
+   * Tracks whether the user has seen the "auto-assigned category" intro
+   * for this task. NULL = haven't seen it yet → MicroTaskCard renders the
+   * 2-second chip preview. Once shown (or dismissed), any client flips
+   * this to now() so the preview never repeats across devices.
+   */
+  categories_introduced_at?: string | null;
   created_at: string;
   updated_at: string;
   categories?: TaskCategory[];
@@ -45,6 +52,7 @@ export type MicroTaskUpdate = Partial<
     | 'timer_state'
     | 'last_started_at'
     | 'archived_at'
+    | 'categories_introduced_at'
   >
 >;
 
@@ -54,6 +62,9 @@ export type TaskTag = {
   id: string;
   user_id: string;
   name: string;
+  /** Soft-delete: archived tags don't show in TaxonomySelect and aren't
+   *  fed to the voice LLM. NULL when the tag is active. */
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -71,6 +82,9 @@ export type TaskCategory = {
    * NULL when the user hasn't filled it in yet.
    */
   description?: string | null;
+  /** Soft-delete: archived categories don't show in TaxonomySelect and
+   *  aren't fed to the voice LLM. NULL when the category is active. */
+  archived_at?: string | null;
   source_tag_id?: string | null;
   created_at: string;
   updated_at: string;

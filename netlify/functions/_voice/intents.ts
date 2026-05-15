@@ -256,10 +256,14 @@ async function applyStartMicrotask(
     : p.category_ids;
 
   if (categoryIds.length > 0) {
+    // Also filter out archived categories — even if the goal had archived
+    // categories attached historically OR the LLM hallucinated one, we never
+    // create new attachments to archived categories.
     const { data: ownedCategories, error: catLookupErr } = await supabase
       .from('task_categories')
       .select('id')
       .eq('user_id', ctx.userId)
+      .is('archived_at', null)
       .in('id', categoryIds);
     if (catLookupErr) throw new Error(`category lookup: ${catLookupErr.message}`);
     const validIds = (ownedCategories ?? []).map((c) => c.id as string);
@@ -458,7 +462,7 @@ export const INTENT_REGISTRY: Record<string, IntentSpec> = {
   "resume_task_id": string | null,     // UUID существующей задачи (только при mode="resume")
   "new_task_title": string | null,     // короткое название (только при mode="create")
   "goal_id": string | null,            // UUID цели если задача явно к ней относится
-  "category_ids": string[]             // 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ (только при mode="create")
+  "category_ids": string[]             // 0..1 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ (только при mode="create"; обычно одна, [] если совпадения нет)
 }`,
     validatePayload: (raw) =>
       validateStartMicrotask(raw) as unknown as Record<string, unknown>,

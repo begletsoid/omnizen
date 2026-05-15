@@ -1,0 +1,355 @@
+/**
+ * Omnizen desktop quick-switcher — Electron main process.
+ *
+ * This is a TRAY APP, not a browser wrapper. There is no main window and
+ * no dashboard mirror. The only UI surfaces are:
+ *   - overlayWindow: frameless, transparent, always-on-top. Hidden until
+ *     the user holds the mouse XButton1; auto-sized to its content via an
+ *     IPC `resize` message from the renderer (no fixed height → no empty
+ *     space, no clipping). Shown immediately on press, hidden on release.
+ *   - settingsWindow: a tiny window with a single "start with system"
+ *     toggle. Opened from the tray or by launching the app again.
+ *   - tray: the app's only persistent presence. Right-click → Exit.
+ *
+ * Lifecycle: single-instance. Launching the shortcut again just opens the
+ * settings window (the overlay keeps running in the background). The app
+ * only quits via the tray's Exit item.
+ *
+ * Mouse hook: a worker_threads Worker installs a Windows WH_MOUSE_LL hook
+ * via koffi and CONSUMES XButton1 so it never reaches other apps.
+ */
+
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, session, Tray } from 'electron';
+import path from 'node:path';
+import { Worker } from 'node:worker_threads';
+
+// Branding. setName/AppUserModelId make Windows show "OmniZen" (not the
+// dev temp/electron name) in the taskbar, tray, and notifications.
+app.setName('OmniZen');
+if (process.platform === 'win32') app.setAppUserModelId('com.omnizen.desktop');
+
+const SESSION_PARTITION = 'persist:omnizen';
+const DEV_URL = 'http://localhost:5173/';
+const PROD_URL = 'https://omnizen.netlify.app/';
+const OMNIZEN_URL = process.env.OMNIZEN_URL ?? (app.isPackaged ? PROD_URL : DEV_URL);
+
+// Overlay window width is fixed; height tracks content. We never let it
+// exceed this fraction of the work area (then it scrolls instead).
+const OVERLAY_WIDTH = 520;
+const OVERLAY_MAX_HEIGHT_FRAC = 0.85;
+// Pull the stack a touch above the exact vertical center.
+const ABOVE_CENTER_OFFSET = 140;
+
+let overlayWindow: BrowserWindow | null = null;
+let settingsWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let mouseWorker: Worker | null = null;
+let overlayVisible = false;
+// Remember the last content height the renderer reported so a re-show
+// positions the window correctly before the renderer re-measures.
+let lastOverlayContentHeight = 320;
+
+function computeOverlayBounds(contentHeight: number) {
+  const primary = screen.getPrimaryDisplay();
+  const wa = primary.workArea;
+  const maxH = Math.round(wa.height * OVERLAY_MAX_HEIGHT_FRAC);
+  const height = Math.max(80, Math.min(Math.ceil(contentHeight), maxH));
+  const width = OVERLAY_WIDTH;
+  const x = Math.round(wa.x + (wa.width - width) / 2);
+  let y = Math.round(wa.y + (wa.height - height) / 2 - ABOVE_CENTER_OFFSET);
+  if (y < wa.y + 8) y = wa.y + 8;
+  return { x, y, width, height };
+}
+
+function applyOverlayBounds(contentHeight: number): void {
+  if (!overlayWindow) return;
+  lastOverlayContentHeight = contentHeight;
+  overlayWindow.setBounds(computeOverlayBounds(contentHeight));
+}
+
+function createOverlayWindow(): void {
+  const bounds = computeOverlayBounds(lastOverlayContentHeight);
+  overlayWindow = new BrowserWindow({
+    ...bounds,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    focusable: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      partition: SESSION_PARTITION,
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  });
+
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  overlayWindow.loadURL(`${OMNIZEN_URL}#overlay`);
+
+  // ── Renderer diagnostics ──
+  // The overlay window is transparent and has no chrome, so a blank /
+  // crashed / errored renderer looks identical to "nothing happens".
+  // Pipe its console + failure events to the main stdout so we can see
+  // what the page is actually doing.
+  const wc = overlayWindow.webContents;
+  wc.on('console-message', (_e, level, message) => {
+    console.log(`[overlay-renderer] (${level}) ${message}`);
+  });
+  wc.on('did-fail-load', (_e, code, desc, url) => {
+    console.log(`[overlay-renderer] did-fail-load ${code} ${desc} ${url}`);
+  });
+  wc.on('did-finish-load', () => {
+    console.log(`[overlay-renderer] did-finish-load ${wc.getURL()}`);
+  });
+  wc.on('render-process-gone', (_e, details) => {
+    console.log(`[overlay-renderer] render-process-gone ${JSON.stringify(details)}`);
+  });
+
+  // Block keyboard-driven back/forward (Alt+Left) inside the overlay;
+  // XButton1 is already consumed by the global hook before it arrives.
+  overlayWindow.webContents.on('will-navigate', (event, url) => {
+    const current = overlayWindow?.webContents.getURL();
+    if (current && new URL(url).origin !== new URL(current).origin) {
+      event.preventDefault();
+    }
+  });
+
+  overlayWindow.on('closed', () => {
+    overlayWindow = null;
+  });
+}
+
+function showOverlay(): void {
+  if (!overlayWindow || overlayVisible) {
+    console.log(`[overlay] showOverlay skipped (win=${!!overlayWindow} visible=${overlayVisible})`);
+    return;
+  }
+  overlayVisible = true;
+  const b = computeOverlayBounds(lastOverlayContentHeight);
+  console.log(`[overlay] show @ ${JSON.stringify(b)}`);
+  overlayWindow.setBounds(b);
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  overlayWindow.show();
+  overlayWindow.moveTop();
+  overlayWindow.focus();
+  overlayWindow.webContents.send('quick-switcher:open');
+}
+
+function hideOverlay(): void {
+  if (!overlayWindow || !overlayVisible) return;
+  overlayVisible = false;
+  overlayWindow.webContents.send('quick-switcher:close');
+  // Slightly faster than the exit animation so we don't yank the window
+  // before it finishes; 150ms tracks the sped-up close keyframe.
+  setTimeout(() => {
+    if (overlayWindow && !overlayVisible) overlayWindow.hide();
+  }, 160);
+}
+
+function createSettingsWindow(): void {
+  if (settingsWindow) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    return;
+  }
+  settingsWindow = new BrowserWindow({
+    width: 380,
+    height: 220,
+    title: 'OmniZen — настройки',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: '#05060a',
+    webPreferences: {
+      partition: SESSION_PARTITION,
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  settingsWindow.setMenuBarVisibility(false);
+  // The loaded Omnizen page sets its own document.title (that's the
+  // "App TMP"-style name the user saw in the taskbar). Lock the window
+  // title to our brand so the taskbar/Alt-Tab label reads "OmniZen".
+  settingsWindow.on('page-title-updated', (e) => {
+    e.preventDefault();
+  });
+  settingsWindow.setTitle('OmniZen — настройки');
+  settingsWindow.loadURL(`${OMNIZEN_URL}#settings`);
+  settingsWindow.webContents.once('did-finish-load', () => {
+    settingsWindow?.setTitle('OmniZen — настройки');
+  });
+  settingsWindow.on('closed', () => {
+    // Closing settings does NOT quit — the overlay keeps running and the
+    // app stays alive in the tray.
+    settingsWindow = null;
+  });
+}
+
+let loginWindow: BrowserWindow | null = null;
+function createLoginWindow(): void {
+  if (loginWindow) {
+    loginWindow.show();
+    loginWindow.focus();
+    return;
+  }
+  // The full Omnizen app (no hash → DashboardShell). The user signs in
+  // here; the Supabase session is written to the shared `persist:omnizen`
+  // partition, so the overlay window (same partition) then has a user.
+  // This is NOT an always-open dashboard — it's an on-demand login
+  // surface the user closes after signing in.
+  loginWindow = new BrowserWindow({
+    width: 1100,
+    height: 800,
+    title: 'OmniZen — вход',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    backgroundColor: '#05060a',
+    webPreferences: {
+      partition: SESSION_PARTITION,
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  loginWindow.setMenuBarVisibility(false);
+  loginWindow.on('page-title-updated', (e) => e.preventDefault());
+  loginWindow.setTitle('OmniZen — вход');
+  loginWindow.loadURL(OMNIZEN_URL);
+  loginWindow.on('closed', () => {
+    loginWindow = null;
+  });
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
+  tray = new Tray(icon);
+  tray.setToolTip('OmniZen — быстрый переключатель');
+  const menu = Menu.buildFromTemplate([
+    { label: 'Войти в OmniZen…', click: () => createLoginWindow() },
+    { label: 'Настройки…', click: () => createSettingsWindow() },
+    { type: 'separator' },
+    {
+      label: 'Выход',
+      click: () => app.quit(),
+    },
+  ]);
+  tray.setContextMenu(menu);
+  tray.on('click', () => createSettingsWindow());
+}
+
+type MouseHookMessage =
+  | { type: 'ready' }
+  | { type: 'thread-id'; value: number }
+  | { type: 'down' }
+  | { type: 'up' }
+  | { type: 'error'; message: string }
+  | { type: 'callback-error'; message: string };
+
+function installMouseHook(): void {
+  const workerPath = path.join(__dirname, 'mouseHook.worker.js');
+  mouseWorker = new Worker(workerPath);
+
+  mouseWorker.on('message', (m: MouseHookMessage) => {
+    switch (m.type) {
+      case 'ready':
+        console.log('[mouseHook] WH_MOUSE_LL installed');
+        break;
+      case 'down':
+        // No delay — the overlay appears the instant the button goes
+        // down (it's consumed globally anyway, so there's no native
+        // "Back" to preserve via a short-click heuristic).
+        showOverlay();
+        break;
+      case 'up':
+        hideOverlay();
+        break;
+      case 'error':
+        console.error('[mouseHook] fatal:', m.message);
+        break;
+      case 'callback-error':
+        console.warn('[mouseHook] callback threw:', m.message);
+        break;
+    }
+  });
+  mouseWorker.on('error', (err) => console.error('[mouseHook] worker error:', err));
+  mouseWorker.on('exit', (code) => {
+    if (code !== 0) console.warn(`[mouseHook] worker exited with code ${code}`);
+    mouseWorker = null;
+  });
+}
+
+function registerIpc(): void {
+  ipcMain.on('quick-switcher:request-close', () => hideOverlay());
+  ipcMain.on('desktop:open-login', () => createLoginWindow());
+
+  ipcMain.on('quick-switcher:resize', (_e, contentHeight: number) => {
+    // Guard against transient 0/tiny measurements (renderer not laid out
+    // yet, or list momentarily empty). A sub-120px overlay is effectively
+    // invisible — that was why the overlay "stopped opening". Ignore
+    // those and keep the last good height.
+    if (
+      typeof contentHeight === 'number' &&
+      Number.isFinite(contentHeight) &&
+      contentHeight >= 120
+    ) {
+      applyOverlayBounds(contentHeight);
+    }
+  });
+
+  // Autostart toggle — works on Windows and macOS via Electron's
+  // login-item API. "system" wording (not "Windows") for portability.
+  ipcMain.handle('desktop:get-autostart', () => app.getLoginItemSettings().openAtLogin);
+  ipcMain.handle('desktop:set-autostart', (_e, enabled: boolean) => {
+    app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
+    return app.getLoginItemSettings().openAtLogin;
+  });
+}
+
+// ── Single instance ──────────────────────────────────────────────────
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  // Another instance is already running the overlay+tray. This launch's
+  // only job was to surface settings — the primary instance does that
+  // via the 'second-instance' handler below — so we exit.
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // Launching the shortcut again: open settings if it isn't already.
+    createSettingsWindow();
+  });
+
+  app.whenReady().then(() => {
+    session.fromPartition(SESSION_PARTITION);
+    createOverlayWindow();
+    createTray();
+    installMouseHook();
+    registerIpc();
+    // First launch also surfaces settings so the user can find the
+    // autostart toggle without hunting for the tray icon.
+    createSettingsWindow();
+  });
+
+  // Tray app: never quit just because all windows closed.
+  app.on('window-all-closed', () => {
+    /* keep running in the tray */
+  });
+
+  app.on('before-quit', () => {
+    if (mouseWorker) mouseWorker.postMessage({ type: 'stop' });
+  });
+}

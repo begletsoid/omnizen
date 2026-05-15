@@ -9,6 +9,8 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-electron
+release
 dist-ssr
 *.local
 .env
@@ -19,6 +21,8 @@ dist-ssr
 coverage
 *.tmp
 .cursor/
+# Claude Code per-agent git worktrees (full repo copies — never commit)
+.claude/
 .env
 .env.*
 

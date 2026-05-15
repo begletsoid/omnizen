@@ -7,10 +7,14 @@ import prettier from 'eslint-config-prettier';
 import { defineConfig, globalIgnores } from 'eslint/config';
 
 export default defineConfig([
-  // `dist/` is the Vite build output. `.claude/` holds Claude Code's per-agent
-  // git worktrees — they're full repo copies and would cause every src file to
-  // be linted N+1 times, also producing duplicate errors in older snapshots.
-  globalIgnores(['dist', '.claude']),
+  // `dist/` is the Vite build output. `dist-electron/` is the Electron main
+  // process compile output. `release/` is electron-builder's installer output.
+  // `.claude/` holds Claude Code's per-agent git worktrees — they're full repo
+  // copies and would cause every src file to be linted N+1 times, also
+  // producing duplicate errors in older snapshots. `electron/` source is
+  // compiled separately via `electron/tsconfig.json` against Node + CommonJS;
+  // it doesn't share the browser-targeted lint rules used by `src/`.
+  globalIgnores(['dist', 'dist-electron', 'release', 'electron', '.claude']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

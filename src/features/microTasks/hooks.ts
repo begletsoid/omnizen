@@ -4,11 +4,15 @@ import { nanoid } from 'nanoid';
 import { supabase } from '../../lib/supabaseClient';
 import { useAuthStore } from '../../stores/authStore';
 import {
+  acknowledgeCategoriesIntroduction,
   attachCategoriesToTask,
   attachTagToCategory,
+  classifyMicrotaskCategories,
   createMicroTask,
   createMicroTaskGroup,
   createMicroTaskGroupTemplate,
+  archiveTaskCategory,
+  archiveTaskTag,
   createTaskCategory,
   createTaskTag,
   deleteMicroTask,
@@ -16,6 +20,8 @@ import {
   deleteMicroTaskGroupTemplate,
   deleteTaskCategory,
   deleteTaskTag,
+  unarchiveTaskCategory,
+  unarchiveTaskTag,
   detachCategoryFromTask,
   detachTagFromCategory,
   fetchNextMicroTaskOrder,
@@ -257,10 +263,28 @@ export function useCreateMicroTask(widgetId: string | null) {
       });
       if (error) throw error;
 
-      const categoriesToAttach =
-        category_ids_override !== undefined ? category_ids_override : (bufferedCategoryIds ?? []);
+      // Category resolution priority:
+      //   1. Explicit override (e.g. dropping a goal onto the widget → use goal's categories).
+      //   2. LLM classification by title (same Groq/Anthropic/OpenAI chain as voice).
+      //   3. Buffer fallback (the user's "default set" of categories).
+      // The LLM call is best-effort: any failure resolves to [] and we fall to the buffer.
+      let categoriesToAttach: string[];
+      if (category_ids_override !== undefined) {
+        categoriesToAttach = category_ids_override;
+      } else {
+        const llmIds = await classifyMicrotaskCategories(insertData.title);
+        categoriesToAttach = llmIds.length > 0 ? llmIds : (bufferedCategoryIds ?? []);
+      }
       if (categoriesToAttach.length > 0) {
         await attachCategoriesToTask(data.id, categoriesToAttach, user.id);
+      } else {
+        // No auto-attached categories → mark the intro as already shown.
+        // Otherwise, if the user later picks a category by hand, the chip
+        // preview would fire — but the user just chose that category, so
+        // they don't need a preview of it.
+        await updateMicroTask(data.id, {
+          categories_introduced_at: new Date().toISOString(),
+        });
       }
 
       return data as MicroTaskRecord;
@@ -406,6 +430,44 @@ export function useArchiveMicroTask(widgetId: string | null) {
     onSettled: () => {
       if (!widgetId) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+    },
+  });
+}
+
+/**
+ * Mark the "auto-assigned categories" intro as seen for a single task.
+ * Used once per task across all devices — the partial `is(... null)` filter
+ * in api.ts guarantees only the first writer wins, so concurrent devices
+ * don't fight. The optimistic update flips `categories_introduced_at` in
+ * the cache immediately so the card swaps back to its normal controls
+ * without waiting for the network round-trip.
+ */
+export function useAcknowledgeCategoriesIntroduction(widgetId: string | null) {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (taskId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      await acknowledgeCategoriesIntroduction(taskId, user.id);
+      return { id: taskId };
+    },
+    onMutate: async (taskId) => {
+      if (!widgetId) return;
+      await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
+      const previous = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
+      const nowIso = new Date().toISOString();
+      queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+        old?.map((task) =>
+          task.id === taskId
+            ? { ...task, categories_introduced_at: task.categories_introduced_at ?? nowIso }
+            : task,
+        ) ?? [],
+      );
+      return { previous };
+    },
+    onError: (_err, _id, context) => {
+      if (!widgetId || !context?.previous) return;
+      queryClient.setQueryData(['microTasks', widgetId], context.previous);
     },
   });
 }
@@ -747,6 +809,85 @@ export function useDeleteTaskTag() {
   });
 }
 
+/**
+ * Archive a tag: mark archived_at = now and cascade to its auto-category.
+ * Existing task→tag attachments are kept (they survive archival), but the
+ * tag stops appearing in TaxonomySelect and in the voice LLM's context.
+ */
+export function useArchiveTaskTag() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (tagId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      return archiveTaskTag(tagId, user.id);
+    },
+    onMutate: async (tagId) => {
+      if (!user) return;
+      const nowIso = new Date().toISOString();
+      await queryClient.cancelQueries({ queryKey: ['taskTags', user.id] });
+      const previousTags = queryClient.getQueryData<TaskTag[]>(['taskTags', user.id]);
+      queryClient.setQueryData<TaskTag[]>(['taskTags', user.id], (old) =>
+        old?.map((tag) => (tag.id === tagId ? { ...tag, archived_at: nowIso } : tag)) ?? [],
+      );
+      // Cascade in the categories cache: auto-category with source_tag_id=tagId.
+      await queryClient.cancelQueries({ queryKey: ['taskCategories', user.id] });
+      const previousCategories = queryClient.getQueryData<TaskCategory[]>([
+        'taskCategories',
+        user.id,
+      ]);
+      queryClient.setQueryData<TaskCategory[]>(['taskCategories', user.id], (old) =>
+        old?.map((cat) =>
+          cat.source_tag_id === tagId && !cat.archived_at
+            ? { ...cat, archived_at: nowIso }
+            : cat,
+        ) ?? [],
+      );
+      return { previousTags, previousCategories };
+    },
+    onError: (_err, _vars, context) => {
+      if (user && context?.previousTags) {
+        queryClient.setQueryData(['taskTags', user.id], context.previousTags);
+      }
+      if (user && context?.previousCategories) {
+        queryClient.setQueryData(['taskCategories', user.id], context.previousCategories);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskTags', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['taskCategories', user?.id] });
+    },
+  });
+}
+
+export function useUnarchiveTaskTag() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (tagId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      return unarchiveTaskTag(tagId, user.id);
+    },
+    onMutate: async (tagId) => {
+      if (!user) return;
+      await queryClient.cancelQueries({ queryKey: ['taskTags', user.id] });
+      const previousTags = queryClient.getQueryData<TaskTag[]>(['taskTags', user.id]);
+      queryClient.setQueryData<TaskTag[]>(['taskTags', user.id], (old) =>
+        old?.map((tag) => (tag.id === tagId ? { ...tag, archived_at: null } : tag)) ?? [],
+      );
+      return { previousTags };
+    },
+    onError: (_err, _vars, context) => {
+      if (user && context?.previousTags) {
+        queryClient.setQueryData(['taskTags', user.id], context.previousTags);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskTags', user?.id] });
+    },
+  });
+}
+
 export function useTaskCategories() {
   const user = useAuthStore((state) => state.user);
   return useQuery<TaskCategory[], Error>({
@@ -897,6 +1038,78 @@ export function useDeleteTaskCategory() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['taskCategories', user?.id] });
       queryClient.invalidateQueries({ queryKey: ['microTasks'] });
+    },
+  });
+}
+
+/**
+ * Archive a category. Pre-existing task→category links survive (the
+ * historical attachment is meaningful even after archiving), but the
+ * category is hidden from new selectors and the voice LLM's context.
+ */
+export function useArchiveTaskCategory() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (categoryId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      return archiveTaskCategory(categoryId, user.id);
+    },
+    onMutate: async (categoryId) => {
+      if (!user) return;
+      const nowIso = new Date().toISOString();
+      await queryClient.cancelQueries({ queryKey: ['taskCategories', user.id] });
+      const previousCategories = queryClient.getQueryData<TaskCategory[]>([
+        'taskCategories',
+        user.id,
+      ]);
+      queryClient.setQueryData<TaskCategory[]>(['taskCategories', user.id], (old) =>
+        old?.map((cat) =>
+          cat.id === categoryId ? { ...cat, archived_at: nowIso } : cat,
+        ) ?? [],
+      );
+      return { previousCategories };
+    },
+    onError: (_err, _vars, context) => {
+      if (user && context?.previousCategories) {
+        queryClient.setQueryData(['taskCategories', user.id], context.previousCategories);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskCategories', user?.id] });
+    },
+  });
+}
+
+export function useUnarchiveTaskCategory() {
+  const user = useAuthStore((state) => state.user);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (categoryId: string) => {
+      if (!user) throw new Error('User not authenticated');
+      return unarchiveTaskCategory(categoryId, user.id);
+    },
+    onMutate: async (categoryId) => {
+      if (!user) return;
+      await queryClient.cancelQueries({ queryKey: ['taskCategories', user.id] });
+      const previousCategories = queryClient.getQueryData<TaskCategory[]>([
+        'taskCategories',
+        user.id,
+      ]);
+      queryClient.setQueryData<TaskCategory[]>(['taskCategories', user.id], (old) =>
+        old?.map((cat) =>
+          cat.id === categoryId ? { ...cat, archived_at: null } : cat,
+        ) ?? [],
+      );
+      return { previousCategories };
+    },
+    onError: (_err, _vars, context) => {
+      if (user && context?.previousCategories) {
+        queryClient.setQueryData(['taskCategories', user.id], context.previousCategories);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['taskCategories', user?.id] });
     },
   });
 }

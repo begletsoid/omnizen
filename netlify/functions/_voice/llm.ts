@@ -81,12 +81,16 @@ export async function loadLlmContext(
     // category_tags → task_tags pulls every tag's name so the LLM sees the
     // category's keyword footprint (e.g. {name: "Работа", tag_names: ["pr",
     // "review", "code"]}). Single round-trip via PostgREST embed.
+    // Phase 3.1: filter out archived categories and archived tags — the
+    // user has explicitly hidden them, and feeding them to the LLM would
+    // make it auto-attach archived categories to new voice-created tasks.
     supabase
       .from('task_categories')
       .select(
-        'id, name, description, is_auto, category_tags(task_tags(name))',
+        'id, name, description, is_auto, category_tags(task_tags(name, archived_at))',
       )
       .eq('user_id', userId)
+      .is('archived_at', null)
       .order('name', { ascending: true }),
     supabase
       .from('task_category_buffers')
@@ -115,9 +119,12 @@ export async function loadLlmContext(
       name: string;
       description: string | null;
       is_auto: boolean;
-      category_tags?: Array<{ task_tags?: { name?: string } }>;
+      category_tags?: Array<{ task_tags?: { name?: string; archived_at?: string | null } }>;
     };
     const tag_names = (r.category_tags ?? [])
+      // Skip archived tags — they're hidden in the UI and shouldn't influence
+      // the LLM's keyword evidence for the category.
+      .filter((ct) => ct.task_tags && !ct.task_tags.archived_at)
       .map((ct) => ct.task_tags?.name)
       .filter((n): n is string => typeof n === 'string');
     return {
@@ -198,12 +205,14 @@ ${intentSection}${rulesHint}
    - Иначе mode="create", new_task_title = нормализованное название, и если фраза явно про какую-то ОТКРЫТУЮ_ЦЕЛЬ — выставь её UUID в goal_id.
 5. **Категоризация (mode="create"):**
    a. Если в payload стоит goal_id — категории НЕ выбирай сам, оставляй category_ids=[]. Сервер автоматически унаследует категории цели.
-   b. Если goal_id=null — выбирай 0..3 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ по смыслу:
+   b. Если goal_id=null — старайся выбрать РОВНО ОДНУ категорию (category_ids длины 1). Несколько категорий допустимо только если задача честно лежит на стыке двух тем и одну выбрать невозможно. Пустой массив [] — нормальный исход, когда явного совпадения нет: лучше [], чем угадывать.
+   c. Как выбирать:
       - Сначала смотри на description: если фраза про что-то описанное в категории (например description «приёмы пищи, обед, ужин» → подходит для «Обед») — это сильный сигнал.
       - Затем на tag_names: совпадение слов из фразы с тегами категории — тоже сильный сигнал.
       - При равном совпадении предпочитай is_auto=false (созданные пользователем сильнее, чем category-автодвойники тегов).
-      - Если не нашлось явных совпадений и фраза неоднозначна — используй ОБЫЧНЫЙ_НАБОР_КАТЕГОРИЙ_ПОЛЬЗОВАТЕЛЯ как дефолт.
-   c. Если у пользователя нет ни описаний, ни тегов, ни buffer — лучше вернуть category_ids=[] чем выдумывать.
+   d. **Предпочитай более узкие категории более широким.** Если фраза одновременно подходит под общую категорию (например «Работа») и под более специфичную внутри неё («Код-ревью», «Митинги») — выбирай специфичную. Узость определяется по описанию и тегам: чем уже и конкретнее description / чем меньше «общих» тегов — тем категория уже. Широкая категория уместна только когда специфичной нет в списке.
+   e. Fallback: если не нашлось явных совпадений и фраза неоднозначна — используй ОБЫЧНЫЙ_НАБОР_КАТЕГОРИЙ_ПОЛЬЗОВАТЕЛЯ как дефолт (тоже одной категорией, если возможно).
+   f. Если у пользователя нет ни описаний, ни тегов, ни buffer — лучше вернуть category_ids=[] чем выдумывать.
 6. **Парсинг add_goal:** "добавь цель X цена N время N часов" — title=X, value=N (если "цена"), expected_hours=N (если "время"). value/expected_hours = null если не упомянуты.
 7. **Никаких UUID, которых нет в КОНТЕКСТЕ.** Все UUID — строго из ОТКРЫТЫЕ_ЦЕЛИ / НЕДАВНИЕ_АКТИВНЫЕ_МИКРОЗАДАЧИ / ДОСТУПНЫЕ_КАТЕГОРИИ или null.
 8. **Никакого текста кроме JSON.** Никаких \`\`\` обёрток.`;
@@ -432,4 +441,112 @@ export async function classifyVoice(
     };
   }
   return { ok: true, plan };
+}
+
+// ============================================================================
+// classifyCategoriesForTitle — lightweight variant used when the user creates
+// a micro-task via the UI input (not via voice). We just need to pick 0..1
+// category UUIDs from the user's set based on the task title — no intent
+// classification, no resume/create branching, no goal linking. The compact
+// prompt keeps latency low (~500-1000 ms typical) since the user is staring
+// at the dashboard waiting for the task to appear.
+// ============================================================================
+
+export type ClassifyCategoriesSuccess = { ok: true; category_ids: string[] };
+export type ClassifyCategoriesFailure = { ok: false; reason: string };
+export type ClassifyCategoriesResult =
+  | ClassifyCategoriesSuccess
+  | ClassifyCategoriesFailure;
+
+function buildCategoryClassifyPrompt(context: LlmContext): string {
+  const categoriesJson = JSON.stringify(context.categories);
+  const recentBufferJson = JSON.stringify(context.recent_buffer);
+  const recentTasksJson = JSON.stringify(
+    context.recent_tasks.map((t) => ({ title: t.title, category_names: t.category_names })),
+  );
+  return `Ты помощник, который подбирает категории для микрозадачи по её названию.
+
+ДОСТУПНЫЕ_КАТЕГОРИИ: ${categoriesJson}
+  // Каждая: { id, name, description, tag_names, is_auto }.
+
+ПОХОЖИЕ_СВЕЖИЕ_ЗАДАЧИ: ${recentTasksJson}
+  // Названия + категории недавних задач — для опоры на привычный выбор пользователя.
+
+ОБЫЧНЫЙ_НАБОР_КАТЕГОРИЙ_ПОЛЬЗОВАТЕЛЯ: ${recentBufferJson}
+  // UUIDs категорий, которые пользователь выбирает чаще всего.
+
+ОТВЕТЬ СТРОГО JSON:
+{ "category_ids": [<0..1 UUID из ДОСТУПНЫЕ_КАТЕГОРИИ>] }
+
+Правила:
+1. Старайся выбрать РОВНО ОДНУ категорию. Несколько — только если задача честно на стыке двух тем.
+2. Пустой массив [] — нормально, если нет уверенного совпадения. Лучше [], чем угадывать.
+3. Описание (description) категории — главный сигнал: если в нём упомянуто что описано в названии задачи, это совпадение.
+4. Теги (tag_names) — тоже сильный сигнал: совпадение слова из названия с тегом категории.
+5. При двойном совпадении предпочитай более узкую категорию более широкой.
+6. При полной неоднозначности можно использовать ОБЫЧНЫЙ_НАБОР как дефолт.
+7. Никаких UUID, которых нет в ДОСТУПНЫЕ_КАТЕГОРИИ. Никакого текста кроме JSON.`;
+}
+
+function parseCategoryIdsResponse(raw: unknown): string[] | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const ids = (raw as { category_ids?: unknown }).category_ids;
+  if (!Array.isArray(ids)) return null;
+  return ids.filter((x): x is string => typeof x === 'string');
+}
+
+export async function classifyCategoriesForTitle(
+  supabase: SupabaseClient,
+  args: { userId: string; title: string },
+): Promise<ClassifyCategoriesResult> {
+  const context = await loadLlmContext(supabase, args.userId);
+  if (context.categories.length === 0) {
+    // No categories means no work to do — return empty quickly without
+    // burning an LLM call.
+    return { ok: true, category_ids: [] };
+  }
+
+  const systemPrompt = buildCategoryClassifyPrompt(context);
+  const userMessage = `Название задачи: "${args.title}"`;
+
+  const errors: string[] = [];
+  let raw: string | null = null;
+
+  if (process.env.GROQ_API_KEY) {
+    try {
+      raw = await callGroq(process.env.GROQ_API_KEY, systemPrompt, userMessage);
+    } catch (err) {
+      errors.push(`groq: ${(err as Error).message}`);
+    }
+  } else {
+    errors.push('groq: GROQ_API_KEY missing');
+  }
+  if (!raw && process.env.ANTHROPIC_API_KEY) {
+    try {
+      raw = await callAnthropic(process.env.ANTHROPIC_API_KEY, systemPrompt, userMessage);
+    } catch (err) {
+      errors.push(`anthropic: ${(err as Error).message}`);
+    }
+  }
+  if (!raw && process.env.OPENAI_API_KEY) {
+    try {
+      raw = await callOpenAi(process.env.OPENAI_API_KEY, systemPrompt, userMessage);
+    } catch (err) {
+      errors.push(`openai: ${(err as Error).message}`);
+    }
+  }
+
+  if (!raw) {
+    return { ok: false, reason: errors.join(' | ') };
+  }
+  const parsed = extractJson(raw);
+  const ids = parseCategoryIdsResponse(parsed);
+  if (ids === null) {
+    return { ok: false, reason: `unparseable LLM response: ${raw.slice(0, 200)}` };
+  }
+  // Validate IDs against the user's known categories — strip anything the
+  // model invented. The webhook still re-validates ownership server-side,
+  // but doing it here avoids a round-trip on bogus results.
+  const validIds = new Set(context.categories.map((c) => c.id));
+  return { ok: true, category_ids: ids.filter((id) => validIds.has(id)).slice(0, 1) };
 }

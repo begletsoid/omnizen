@@ -76,6 +76,11 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useTaskCategoryBuffer: () => ({ data: [] }),
   useUpdateTaskCategoryColor: () => updateCategoryColorMutation,
   useUpdateTaskCategoryDescription: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useArchiveTaskCategory: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useUnarchiveTaskCategory: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useArchiveTaskTag: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useUnarchiveTaskTag: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
+  useAcknowledgeCategoriesIntroduction: () => ({ mutate: vi.fn(), mutateAsync: vi.fn() }),
 }));
 
 describe('Micro task taxonomy', () => {
@@ -322,6 +327,7 @@ function buildCategory(
 }
 
 function buildTask(id: string, title: string, categoryIds: string[]): MicroTaskRecord {
+  const now = new Date().toISOString();
   return {
     id,
     widget_id: 'widget-1',
@@ -335,8 +341,11 @@ function buildTask(id: string, title: string, categoryIds: string[]): MicroTaskR
     timer_state: 'never',
     last_started_at: null,
     archived_at: null,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    // Mark categories intro as already shown — tests assume the steady-state
+    // UI with the tag/timer/archive buttons, not the 2-second chip preview.
+    categories_introduced_at: now,
+    created_at: now,
+    updated_at: now,
     categories: categoryIds.map((categoryId) =>
       mockCategories.find((category) => category.id === categoryId) ?? buildCategory(categoryId, categoryId, false, []),
     ),

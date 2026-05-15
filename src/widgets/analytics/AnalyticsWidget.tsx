@@ -274,7 +274,10 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
   const nonAutoCategories = useMemo(
     () =>
       (categories ?? [])
-        .filter((c) => !c.is_auto)
+        // Hide archived: voice/UI should not let users attach archived
+        // categories to new things. Archived categories are still listed
+        // (with restore) only inside the Taxonomy Manager popover.
+        .filter((c) => !c.is_auto && !c.archived_at)
         .map((cat) => ({
           ...cat,
           color: cat.color ?? null,
@@ -868,8 +871,8 @@ export function AnalyticsWidget({ widgetId }: AnalyticsWidgetProps) {
                           <TaxonomySelect
                             placeholder="Добавить тег"
                             ariaLabel="Добавить тег к таймеру"
-                            options={tags.map((tag) => ({ value: tag.id, label: tag.name }))}
-                            disabled={tags.length === 0}
+                            options={tags.filter((tag) => !tag.archived_at).map((tag) => ({ value: tag.id, label: tag.name }))}
+                            disabled={tags.filter((tag) => !tag.archived_at).length === 0}
                             className="w-full"
                             enableSearch
                             autoFocus

@@ -35,7 +35,7 @@ export function SaveIcon({ className }: { className?: string }) {
   );
 }
 
-export function ArchiveIcon() {
+export function ArchiveIcon({ className }: { className?: string }) {
   return (
     <svg
       width="16"
@@ -47,6 +47,7 @@ export function ArchiveIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
+      className={className}
     >
       <path d="M4 7h16" />
       <path d="M5 7v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7" />

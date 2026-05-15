@@ -21,6 +21,9 @@ import clsx from 'clsx';
 import { useQueryClient } from '@tanstack/react-query';
 
 import {
+  useAcknowledgeCategoriesIntroduction,
+  useArchiveTaskCategory,
+  useArchiveTaskTag,
   useAttachCategoryToTask,
   useAttachTagToCategory,
   useCreateMicroTaskGroup,
@@ -36,6 +39,8 @@ import {
   useDeleteTaskTag,
   useDetachCategoryFromTask,
   useDetachTagFromCategory,
+  useUnarchiveTaskCategory,
+  useUnarchiveTaskTag,
   useMicroTaskGroups,
   useMicroTaskGroupTemplates,
   useMicroTasks,
@@ -77,7 +82,7 @@ import { GroupHeader } from './components/GroupHeader';
 import { TimerPill, SortableTimerPill } from './components/TimerPill';
 import { TaxonomySelect } from './components/TaxonomySelect';
 import { TimeTransferOverlay } from './components/TimeTransferOverlay';
-import { TagIcon } from './components/Icons';
+import { TagIcon, ArchiveIcon } from './components/Icons';
 import { usePointerDnd } from './hooks/usePointerDnd';
 import { useTimeTransferDrag } from './hooks/useTimeTransferDrag';
 import { useDuplicateOnD } from './hooks/useDuplicateOnD';
@@ -194,14 +199,19 @@ export function MicroTasksWidget({
   const toggleTimer = useToggleMicroTaskTimer(widgetId);
   const transferTime = useTransferMicroTaskTime(widgetId);
   const archiveTask = useArchiveMicroTask(widgetId);
+  const acknowledgeIntroduction = useAcknowledgeCategoriesIntroduction(widgetId);
   const attachCategoryToTask = useAttachCategoryToTask();
   const detachCategoryFromTask = useDetachCategoryFromTask();
   const setCategoryBuffer = useSetTaskCategoryBuffer();
   const createTag = useCreateTaskTag();
   const deleteTag = useDeleteTaskTag();
+  const archiveTag = useArchiveTaskTag();
+  const unarchiveTag = useUnarchiveTaskTag();
   const createCategory = useCreateTaskCategory();
   const renameCategory = useRenameTaskCategory();
   const deleteCategory = useDeleteTaskCategory();
+  const archiveCategory = useArchiveTaskCategory();
+  const unarchiveCategory = useUnarchiveTaskCategory();
   const attachTagToCategory = useAttachTagToCategory();
   const detachTagFromCategory = useDetachTagFromCategory();
 
@@ -972,6 +982,13 @@ export function MicroTasksWidget({
           taskCategories={taskCategories}
           onAttachCategory={(categoryId) => handleAttachCategory(task, categoryId)}
           onDetachCategory={(categoryId) => handleDetachCategory(task, categoryId)}
+          onAcknowledgeIntroduction={() => {
+            // Idempotent on the server side; we also skip locally if the
+            // task already has a timestamp set so we don't spam mutations.
+            if (task.id.startsWith('temp-')) return;
+            if (task.categories_introduced_at) return;
+            acknowledgeIntroduction.mutate(task.id);
+          }}
           isEditingTime={editingTimeTaskId === task.id}
           timeDraft={editingTimeTaskId === task.id ? timeDraft : ''}
           isTimeInvalid={isTimeInvalid}
@@ -979,7 +996,7 @@ export function MicroTasksWidget({
         />
       );
     },
-    [effectiveRunningId, taskSecondsMap, computeTaskSeconds, editingTask, editingTimeTaskId, timeDraft, isTimeInvalid, isTimeSaving, taskCategories, archiveTask.isPending, archiveTask.variables, dragState, registerRef, handlePointerDown, transferDrag, transferState, transferEffectiveMinutes, transferRequestedMinutes],
+    [effectiveRunningId, taskSecondsMap, computeTaskSeconds, editingTask, editingTimeTaskId, timeDraft, isTimeInvalid, isTimeSaving, taskCategories, archiveTask.isPending, archiveTask.variables, dragState, registerRef, handlePointerDown, transferDrag, transferState, transferEffectiveMinutes, transferRequestedMinutes, acknowledgeIntroduction],
   );
 
   return (
@@ -1169,14 +1186,64 @@ export function MicroTasksWidget({
               </div>
               <div className="flex flex-wrap gap-2">
                 {tags.length === 0 && <p className="text-muted">Теги не созданы</p>}
-                {tags.map((tag) => (
+                {tags.filter((t) => !t.archived_at).map((tag) => (
                   <span key={tag.id} className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1">
                     <span>{tag.name}</span>
-                    <button type="button" onClick={() => deleteTag.mutateAsync(tag.id)} className="text-muted transition hover:text-rose-400" aria-label={`Удалить тег ${tag.name}`}>✕</button>
+                    <button type="button" onClick={() => archiveTag.mutateAsync(tag.id)} className="text-white/50 transition hover:text-white/80" aria-label={`Архивировать тег ${tag.name}`} title="Архивировать"><ArchiveIcon className="h-3.5 w-3.5" /></button>
+                    <button type="button" onClick={() => deleteTag.mutateAsync(tag.id)} className="text-muted transition hover:text-rose-400" aria-label={`Удалить тег ${tag.name}`} title="Удалить совсем">✕</button>
                   </span>
                 ))}
               </div>
             </section>
+
+            {/*
+              Archived section: collapsible block sandwiched between Tags
+              and Categories per UX request. Hidden when nothing is archived
+              to keep the main view focused on active items.
+            */}
+            {(tags.some((t) => t.archived_at) || taskCategories.some((c) => c.archived_at)) && (
+              <section className="mt-4 border-t border-white/10 pt-3">
+                <details>
+                  <summary className="cursor-pointer text-[0.6rem] uppercase tracking-[0.2em] text-muted hover:text-white">
+                    Архив
+                  </summary>
+                  {tags.some((t) => t.archived_at) && (
+                    <div className="mt-2">
+                      <p className="mb-1 text-[0.6rem] uppercase tracking-[0.2em] text-muted">Архивные теги</p>
+                      <div className="flex flex-wrap gap-2">
+                        {tags.filter((t) => t.archived_at).map((tag) => (
+                          <span key={tag.id} className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-muted line-through">
+                            <span>{tag.name}</span>
+                            <button type="button" onClick={() => unarchiveTag.mutateAsync(tag.id)} className="text-muted no-underline transition hover:text-emerald-300" aria-label={`Восстановить тег ${tag.name}`} title="Восстановить">↩</button>
+                            <button type="button" onClick={() => deleteTag.mutateAsync(tag.id)} className="text-muted no-underline transition hover:text-rose-400" aria-label={`Удалить тег ${tag.name}`} title="Удалить совсем">✕</button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {taskCategories.some((c) => c.archived_at) && (
+                    <div className="mt-3">
+                      <p className="mb-1 text-[0.6rem] uppercase tracking-[0.2em] text-muted">Архивные категории</p>
+                      <div className="flex flex-col gap-1.5">
+                        {taskCategories.filter((c) => c.archived_at).map((category) => (
+                          <div key={category.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5">
+                            <span className="text-muted line-through">
+                              {category.name}
+                              {category.is_auto && <span className="ml-2 text-[0.65rem] uppercase">auto</span>}
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button type="button" onClick={() => unarchiveCategory.mutateAsync(category.id)} className="rounded-full p-1 text-muted transition hover:text-emerald-300" aria-label="Восстановить категорию" title="Восстановить">↩</button>
+                              <button type="button" onClick={() => deleteCategory.mutateAsync(category.id)} className="rounded-full p-1 text-muted transition hover:text-rose-400" aria-label="Удалить категорию" title="Удалить совсем">✕</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </details>
+              </section>
+            )}
+
             <section className="mt-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-[0.6rem] uppercase tracking-[0.2em] text-muted">Категории</h3>
@@ -1188,8 +1255,10 @@ export function MicroTasksWidget({
               </div>
               <div className="max-h-[40rem] space-y-3 overflow-y-auto pr-1">
                 {taskCategories.length === 0 && <p className="text-muted">Категории не созданы</p>}
-                {taskCategories.map((category) => {
-                  const availableTags = tags.filter((tag) => !category.tags?.some((existing) => existing.id === tag.id));
+                {taskCategories.filter((c) => !c.archived_at).map((category) => {
+                  const availableTags = tags.filter(
+                    (tag) => !tag.archived_at && !category.tags?.some((existing) => existing.id === tag.id),
+                  );
                   const colorPreset = getCategoryColorPreset(category.color);
                   return (
                     <div key={category.id} data-testid={`category-card-${category.id}`} className="relative overflow-visible rounded-2xl border border-white/10 bg-white/5 p-3">
@@ -1208,7 +1277,8 @@ export function MicroTasksWidget({
                           {!category.is_auto && (
                             <button type="button" onClick={() => handleStartRenameCategory(category)} className="rounded-full p-1 text-muted transition hover:text-white" aria-label="Переименовать">✎</button>
                           )}
-                          <button type="button" onClick={() => deleteCategory.mutateAsync(category.id)} className="rounded-full p-1 text-muted transition hover:text-rose-400" aria-label="Удалить категорию">✕</button>
+                          <button type="button" onClick={() => archiveCategory.mutateAsync(category.id)} className="rounded-full p-1 text-white/50 transition hover:text-white/80" aria-label="Архивировать категорию" title="Архивировать"><ArchiveIcon className="h-3.5 w-3.5" /></button>
+                          <button type="button" onClick={() => deleteCategory.mutateAsync(category.id)} className="rounded-full p-1 text-muted transition hover:text-rose-400" aria-label="Удалить категорию" title="Удалить совсем">✕</button>
                         </div>
                       </div>
                       <div className="mt-2 flex flex-wrap gap-2">
@@ -1234,41 +1304,49 @@ export function MicroTasksWidget({
                           </button>
                         </div>
                       </div>
+                      {/*
+                        Description editor: collapsed = single line with truncation,
+                        on focus expands to up to 4 rows, saves on blur. Lives here
+                        (inside the category card) per UX preference, not in the
+                        color popover.
+                      */}
+                      <div className="mt-2">
+                        <CategoryDescriptionEditor
+                          key={`${category.id}-${category.description ?? ''}`}
+                          initial={category.description ?? ''}
+                          onSave={(value) => {
+                            const trimmed = value.trim();
+                            const next = trimmed.length > 0 ? trimmed : null;
+                            if (next === (category.description ?? null)) return;
+                            updateCategoryDescription.mutate({ id: category.id, description: next });
+                          }}
+                        />
+                      </div>
                     </div>
                   );
                 })}
               </div>
             </section>
+
           </div>
         </FloatingPortal>
       )}
 
-      {/* Category Color + Description Menu */}
+      {/* Category Color Menu (description editor moved into the category card itself, see below) */}
       {colorMenuCategory && colorMenuPosition && (
         <FloatingPortal>
-          <div ref={colorMenuRef} className="fixed z-[2000] w-72 rounded-2xl border border-white/10 bg-background/95 p-3 text-[0.65rem] text-text shadow-2xl backdrop-blur"
+          <div ref={colorMenuRef} className="fixed z-[2000] w-40 rounded-2xl border border-white/10 bg-background/95 p-3 text-[0.65rem] text-text shadow-2xl backdrop-blur"
             style={{ top: colorMenuPosition.y, left: colorMenuPosition.x }}>
             <p className="px-1 text-[0.55rem] uppercase tracking-[0.2em] text-muted">Цвет</p>
-            <div className="mt-2 grid grid-cols-7 gap-2">
+            <div className="mt-2 grid grid-cols-3 gap-2">
               {CATEGORY_COLOR_PRESETS.map((preset) => (
                 <button key={preset.id} type="button" onClick={() => handleSelectCategoryColor(colorMenuCategory.id, preset.id === 'neutral' ? null : preset.id)}
-                  className={clsx('flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 transition hover:border-white/30', colorMenuCategory.color === preset.id && 'ring-2 ring-accent/40')}
+                  className={clsx('flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 transition hover:border-white/30', colorMenuCategory.color === preset.id && 'ring-2 ring-accent/40')}
                   aria-label={`Цвет: ${preset.label}`}>
                   <TagIcon className={clsx('h-4 w-4', preset.iconClass)} />
                 </button>
               ))}
             </div>
-            <p className="mt-3 px-1 text-[0.55rem] uppercase tracking-[0.2em] text-muted">Описание</p>
-            <CategoryDescriptionEditor
-              key={colorMenuCategory.id}
-              initial={colorMenuCategory.description ?? ''}
-              onSave={(value) => {
-                const trimmed = value.trim();
-                const next = trimmed.length > 0 ? trimmed : null;
-                if (next === (colorMenuCategory.description ?? null)) return;
-                updateCategoryDescription.mutate({ id: colorMenuCategory.id, description: next });
-              }}
-            />
           </div>
         </FloatingPortal>
       )}

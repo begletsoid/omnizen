@@ -1,0 +1,36 @@
+{
+  "appId": "com.omnizen.desktop",
+  "productName": "OmniZen",
+  "directories": {
+    "output": "release"
+  },
+  "icon": "electron/assets/icon.png",
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "dist-electron/main.js"
+  },
+  "asarUnpack": [
+    "**/node_modules/koffi/**"
+  ],
+  "npmRebuild": false,
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "perMachine": false
+  },
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+    "category": "public.app-category.productivity"
+  }
+}

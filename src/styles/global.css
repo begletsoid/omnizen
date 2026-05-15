@@ -41,3 +41,119 @@
     background-color: color-mix(in srgb, var(--color-surface) 90%, transparent);
   }
 }
+
+/* Quick-switcher overlay (Electron desktop wrapper). The .qs-overlay-*
+   classes are toggled by `QuickSwitcherOverlay`'s `phase` state. The
+   timings here MUST stay in sync with ENTER_MS / EXIT_MS in that file. */
+/* Opacity + a small vertical slide ONLY. The earlier version also
+   animated `scale(0.98→1)`; the scale snap at the end (combined with the
+   window re-measuring) is what made the entrance look like it "jerked
+   up" a few px. Pure translate + fade with an ease-out curve settles
+   smoothly with no overshoot. */
+@keyframes qs-overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes qs-overlay-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* Durations MUST match ENTER_MS / EXIT_MS in QuickSwitcherOverlay.tsx. */
+.qs-overlay-entering {
+  animation: qs-overlay-in 123ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.qs-overlay-exiting {
+  animation: qs-overlay-out 100ms ease-in forwards;
+}
+
+/* Hide the scrollbar but keep wheel/trackpad scrolling. The overlay
+   auto-sizes to content, so this only matters when there are more tasks
+   than 85% of the screen height can show. */
+.qs-noscrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* old Edge */
+}
+.qs-noscrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Number badge → ✓ when a task is marked done from the overlay. */
+@keyframes qs-check-pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.qs-check-pop {
+  animation: qs-check-pop 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Row collapse + fade after the checkmark hold, just before the task is
+   removed from the list (which then renumbers the remaining rows). */
+@keyframes qs-row-exit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+    max-height: 80px;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+    max-height: 0;
+    margin: 0;
+    padding: 0;
+  }
+}
+.qs-row-exit {
+  overflow: hidden;
+  animation: qs-row-exit 200ms ease-in forwards;
+}
+
+/* MicroTaskCard auto-category intro: the chips fade in over the first ~12%
+   of the cycle, hold for ~76%, then fade out over the last ~12%. The
+   1500ms total duration matches the setTimeout in MicroTaskCard.tsx that
+   acks the intro and unmounts the chip overlay. The underlying controls
+   fade back in via Tailwind's `transition-opacity` on the same div. */
+@keyframes mt-card-intro-cycle {
+  0% {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  88% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
