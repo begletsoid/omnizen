@@ -62,6 +62,11 @@ contextBridge.exposeInMainWorld('omnizenDesktop', {
   setAutostart(enabled: boolean): Promise<boolean> {
     return ipcRenderer.invoke('desktop:set-autostart', enabled);
   },
+  /** Autostart only works in the packaged build (no Vite at login in
+   *  dev). The Settings UI uses this to disable the toggle in dev. */
+  isPackaged(): Promise<boolean> {
+    return ipcRenderer.invoke('desktop:is-packaged');
+  },
   /** Open a normal window with the full app so the user can sign in.
    *  The session persists in the shared partition the overlay uses. */
   openLogin(): void {

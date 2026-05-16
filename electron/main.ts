@@ -293,6 +293,39 @@ function installMouseHook(): void {
   });
 }
 
+// True when the process was launched by the OS login item (autostart),
+// not by the user double-clicking the shortcut. On Windows we tag the
+// login-item command with `--autostart`; macOS also exposes
+// `wasOpenedAtLogin`. Used to stay fully headless on autostart.
+const startedByAutostart =
+  process.argv.includes('--autostart') ||
+  app.getLoginItemSettings().wasOpenedAtLogin === true;
+
+/**
+ * Register/clear the OS login item with an EXPLICIT path + args so it
+ * launches the real app headlessly — not a bare `electron.exe` (which
+ * showed Electron's default welcome screen and never ran our main.js).
+ *
+ *  - Packaged: path = OmniZen.exe, args = ['--autostart'].
+ *  - Dev:      path = electron.exe, args = [<main.js>, '--autostart'].
+ *              (Dev autostart still can't render the overlay — there's
+ *              no Vite server at login — but at least we never register
+ *              a broken bare-electron command. The Settings UI disables
+ *              the toggle outside the packaged build.)
+ *  - macOS:    also `openAsHidden: true`.
+ */
+function applyLoginItem(enabled: boolean): void {
+  const args = app.isPackaged
+    ? ['--autostart']
+    : [path.join(__dirname, 'main.js'), '--autostart'];
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    openAsHidden: true, // macOS-only flag, ignored on Windows
+    path: process.execPath,
+    args,
+  });
+}
+
 function registerIpc(): void {
   ipcMain.on('quick-switcher:request-close', () => hideOverlay());
   ipcMain.on('desktop:open-login', () => createLoginWindow());
@@ -311,13 +344,16 @@ function registerIpc(): void {
     }
   });
 
-  // Autostart toggle — works on Windows and macOS via Electron's
-  // login-item API. "system" wording (not "Windows") for portability.
+  // Autostart toggle — registers an explicit headless command (see
+  // applyLoginItem). "system" wording (not "Windows") for portability.
   ipcMain.handle('desktop:get-autostart', () => app.getLoginItemSettings().openAtLogin);
   ipcMain.handle('desktop:set-autostart', (_e, enabled: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: Boolean(enabled) });
+    applyLoginItem(Boolean(enabled));
     return app.getLoginItemSettings().openAtLogin;
   });
+  // The Settings UI disables the autostart toggle outside the packaged
+  // build (dev autostart can't render the overlay — no Vite at login).
+  ipcMain.handle('desktop:is-packaged', () => app.isPackaged);
 }
 
 // ── Single instance ──────────────────────────────────────────────────
@@ -339,9 +375,11 @@ if (!gotLock) {
     createTray();
     installMouseHook();
     registerIpc();
-    // First launch also surfaces settings so the user can find the
-    // autostart toggle without hunting for the tray icon.
-    createSettingsWindow();
+    // Headless on autostart: tray + hook + hidden overlay only, ZERO
+    // windows. Only a manual launch (double-click of the shortcut)
+    // surfaces the settings window so the user can reach settings/login
+    // without hunting for the tray icon.
+    if (!startedByAutostart) createSettingsWindow();
   });
 
   // Tray app: never quit just because all windows closed.
