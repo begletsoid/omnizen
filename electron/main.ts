@@ -56,7 +56,17 @@ function dlog(msg: string): void {
  */
 function loadWithRetry(win: BrowserWindow, url: string, label: string): void {
   let attempt = 0;
-  const tryOnce = () => {
+  const tryOnce = async () => {
+    if (win.isDestroyed()) return;
+    // Wipe Chromium's negative DNS cache before every attempt. Without
+    // this, an offline start poisons the resolver — even after VPN/
+    // network comes up the retries keep failing on the cached
+    // NAME_NOT_RESOLVED until the app is restarted.
+    try {
+      await session.fromPartition(SESSION_PARTITION).clearHostResolverCache();
+    } catch {
+      /* ignore */
+    }
     if (win.isDestroyed()) return;
     win.loadURL(url).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
@@ -64,6 +74,8 @@ function loadWithRetry(win: BrowserWindow, url: string, label: string): void {
     });
   };
   const wc = win.webContents;
+  wc.on('did-start-loading', () => dlog(`[${label}] did-start-loading`));
+  wc.on('did-stop-loading', () => dlog(`[${label}] did-stop-loading url=${wc.getURL()}`));
   wc.on('did-fail-load', (_e, code, desc, failedURL, isMainFrame) => {
     // Sub-frame failures and Chromium's internal aborts (-3 ABORTED,
     // happens during our own reload) are not real network failures.
@@ -72,19 +84,49 @@ function loadWithRetry(win: BrowserWindow, url: string, label: string): void {
     attempt += 1;
     const delay = Math.min(2_000 * 2 ** (attempt - 1), 30_000);
     dlog(`[${label}] did-fail-load code=${code} desc=${desc} url=${failedURL} → retry #${attempt} in ${delay}ms`);
-    setTimeout(tryOnce, delay);
+    setTimeout(() => { void tryOnce(); }, delay);
   });
   wc.on('did-finish-load', () => {
-    if (attempt > 0) dlog(`[${label}] recovered after ${attempt} retries`);
+    if (attempt > 0) dlog(`[${label}] recovered after ${attempt} retries; url=${wc.getURL()}`);
+    else dlog(`[${label}] did-finish-load url=${wc.getURL()}`);
     attempt = 0;
   });
-  tryOnce();
+  void tryOnce();
+}
+
+/**
+ * The overlay window is the user's only feedback that the app works.
+ * If its webContents got stuck on `about:blank` or a `chrome-error://`
+ * page (typically after a cold-boot offline start that the retry chain
+ * didn't recover), pressing XButton1 should itself act as a recovery
+ * trigger — clear DNS, kick a fresh load, then show. Saves the user
+ * from "помог только перезапуск".
+ */
+async function ensureOverlayLoaded(win: BrowserWindow, url: string, label: string): Promise<void> {
+  if (win.isDestroyed()) return;
+  const current = win.webContents.getURL();
+  const broken =
+    !current ||
+    current === 'about:blank' ||
+    current.startsWith('chrome-error://') ||
+    win.webContents.isCrashed?.();
+  if (!broken) return;
+  dlog(`[${label}] forcing reload before show — current url="${current}"`);
+  try {
+    await session.fromPartition(SESSION_PARTITION).clearHostResolverCache();
+  } catch {
+    /* ignore */
+  }
+  win.loadURL(url).catch(() => undefined);
 }
 
 // Branding. setName/AppUserModelId make Windows show "OmniZen" (not the
 // dev temp/electron name) in the taskbar, tray, and notifications.
 app.setName('OmniZen');
 if (process.platform === 'win32') app.setAppUserModelId('com.omnizen.desktop');
+// Tray-only on macOS: keep the app out of the Dock and the cmd-tab
+// switcher. No-op on other platforms.
+if (process.platform === 'darwin') app.setActivationPolicy?.('accessory');
 
 const SESSION_PARTITION = 'persist:omnizen';
 const DEV_URL = 'http://localhost:5173/';
@@ -196,6 +238,11 @@ function showOverlay(): void {
   overlayVisible = true;
   const b = computeOverlayBounds(lastOverlayContentHeight);
   console.log(`[overlay] show @ ${JSON.stringify(b)}`);
+  // Recover from a broken renderer state (cold-boot offline → page
+  // failed to load → about:blank or error page). Fire-and-forget; the
+  // load will happen in parallel with the window becoming visible so
+  // the user doesn't have to wait.
+  void ensureOverlayLoaded(overlayWindow, `${OMNIZEN_URL}#overlay`, 'overlay');
   overlayWindow.setBounds(b);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
   overlayWindow.show();
@@ -329,6 +376,15 @@ type MouseHookMessage =
   | { type: 'callback-error'; message: string };
 
 function installMouseHook(): void {
+  // The worker is currently Windows-only (loads user32.dll via koffi).
+  // On macOS it would throw at top level; the rest of the app — tray,
+  // settings window, overlay UI — works fine without it. The macOS
+  // CGEventTap port lives in `mouseHook.macos.worker.ts` (see
+  // docs/macos-port.md) and isn't implemented yet.
+  if (process.platform !== 'win32') {
+    dlog(`installMouseHook: platform=${process.platform}, skipping (Windows-only hook; macOS port pending)`);
+    return;
+  }
   const workerPath = path.join(__dirname, 'mouseHook.worker.js');
   mouseWorker = new Worker(workerPath);
 
