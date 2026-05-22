@@ -20,8 +20,66 @@
  */
 
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, session, Tray } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
+
+/**
+ * Append-only debug log for things that have no other visible surface
+ * in a packaged tray app (no stdout console). Location:
+ * `%APPDATA%\OmniZen\desktop.log` on Windows. Lazy because it depends
+ * on `app.getPath('userData')` being available — guard with try/catch.
+ */
+function dlog(msg: string): void {
+  try {
+    const dir = app.getPath('userData');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, 'desktop.log'),
+      `[${new Date().toISOString()}] ${msg}\n`,
+    );
+  } catch {
+    /* if we can't log we can't log */
+  }
+}
+
+/**
+ * loadURL with automatic retry on transient network failures. At system
+ * cold boot (autostart) the network/VPN often isn't ready yet — the
+ * first `loadURL` against netlify fails (`did-fail-load`), the window
+ * is left blank (black for a transparent overlay), and nothing ever
+ * recovers. With retry we keep trying with exponential backoff capped
+ * at 30s, indefinitely, so the moment connectivity is up the page
+ * loads and the user can use the app without restarting it.
+ *
+ * Retry resets to 0 on the first successful `did-finish-load`.
+ */
+function loadWithRetry(win: BrowserWindow, url: string, label: string): void {
+  let attempt = 0;
+  const tryOnce = () => {
+    if (win.isDestroyed()) return;
+    win.loadURL(url).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      dlog(`[${label}] loadURL rejected: ${msg}`);
+    });
+  };
+  const wc = win.webContents;
+  wc.on('did-fail-load', (_e, code, desc, failedURL, isMainFrame) => {
+    // Sub-frame failures and Chromium's internal aborts (-3 ABORTED,
+    // happens during our own reload) are not real network failures.
+    if (!isMainFrame || code === -3) return;
+    if (win.isDestroyed()) return;
+    attempt += 1;
+    const delay = Math.min(2_000 * 2 ** (attempt - 1), 30_000);
+    dlog(`[${label}] did-fail-load code=${code} desc=${desc} url=${failedURL} → retry #${attempt} in ${delay}ms`);
+    setTimeout(tryOnce, delay);
+  });
+  wc.on('did-finish-load', () => {
+    if (attempt > 0) dlog(`[${label}] recovered after ${attempt} retries`);
+    attempt = 0;
+  });
+  tryOnce();
+}
 
 // Branding. setName/AppUserModelId make Windows show "OmniZen" (not the
 // dev temp/electron name) in the taskbar, tray, and notifications.
@@ -77,7 +135,10 @@ function createOverlayWindow(): void {
     movable: false,
     minimizable: false,
     maximizable: false,
-    closable: false,
+    // `closable: false` made `win.close()` a no-op, which blocked
+    // `app.quit()` from ever completing (Tray → "Выход" did nothing).
+    // The frame is hidden anyway, so the user can't accidentally close
+    // the window — removing the flag is harmless.
     fullscreenable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -96,26 +157,22 @@ function createOverlayWindow(): void {
   });
 
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
-  overlayWindow.loadURL(`${OMNIZEN_URL}#overlay`);
 
   // ── Renderer diagnostics ──
   // The overlay window is transparent and has no chrome, so a blank /
   // crashed / errored renderer looks identical to "nothing happens".
-  // Pipe its console + failure events to the main stdout so we can see
-  // what the page is actually doing.
+  // Pipe its console + failure events to the main stdout / debug log so
+  // we can see what the page is actually doing.
   const wc = overlayWindow.webContents;
   wc.on('console-message', (_e, level, message) => {
     console.log(`[overlay-renderer] (${level}) ${message}`);
   });
-  wc.on('did-fail-load', (_e, code, desc, url) => {
-    console.log(`[overlay-renderer] did-fail-load ${code} ${desc} ${url}`);
-  });
-  wc.on('did-finish-load', () => {
-    console.log(`[overlay-renderer] did-finish-load ${wc.getURL()}`);
-  });
   wc.on('render-process-gone', (_e, details) => {
     console.log(`[overlay-renderer] render-process-gone ${JSON.stringify(details)}`);
   });
+
+  // Auto-retry on cold-boot network failures (VPN not up yet, etc.).
+  loadWithRetry(overlayWindow, `${OMNIZEN_URL}#overlay`, 'overlay');
 
   // Block keyboard-driven back/forward (Alt+Left) inside the overlay;
   // XButton1 is already consumed by the global hook before it arrives.
@@ -189,10 +246,10 @@ function createSettingsWindow(): void {
     e.preventDefault();
   });
   settingsWindow.setTitle('OmniZen — настройки');
-  settingsWindow.loadURL(`${OMNIZEN_URL}#settings`);
   settingsWindow.webContents.once('did-finish-load', () => {
     settingsWindow?.setTitle('OmniZen — настройки');
   });
+  loadWithRetry(settingsWindow, `${OMNIZEN_URL}#settings`, 'settings');
   settingsWindow.on('closed', () => {
     // Closing settings does NOT quit — the overlay keeps running and the
     // app stays alive in the tray.
@@ -229,7 +286,7 @@ function createLoginWindow(): void {
   loginWindow.setMenuBarVisibility(false);
   loginWindow.on('page-title-updated', (e) => e.preventDefault());
   loginWindow.setTitle('OmniZen — вход');
-  loginWindow.loadURL(OMNIZEN_URL);
+  loadWithRetry(loginWindow, OMNIZEN_URL, 'login');
   loginWindow.on('closed', () => {
     loginWindow = null;
   });
@@ -245,7 +302,18 @@ function createTray(): void {
     { type: 'separator' },
     {
       label: 'Выход',
-      click: () => app.quit(),
+      click: () => {
+        // Force-destroy any open windows before quit. `app.quit()` alone
+        // sometimes gets stuck waiting for windows to close cleanly
+        // (esp. our transparent/frameless overlay). Destroy is a hard
+        // tear-down that ignores closable/preventDefault, so quit
+        // proceeds to before-quit (stop mouse-hook worker) and exits.
+        dlog('tray exit clicked');
+        for (const w of BrowserWindow.getAllWindows()) {
+          try { w.destroy(); } catch { /* ignore */ }
+        }
+        app.quit();
+      },
     },
   ]);
   tray.setContextMenu(menu);
@@ -300,6 +368,7 @@ function installMouseHook(): void {
 const startedByAutostart =
   process.argv.includes('--autostart') ||
   app.getLoginItemSettings().wasOpenedAtLogin === true;
+dlog(`startup argv=${JSON.stringify(process.argv)} startedByAutostart=${startedByAutostart} isPackaged=${app.isPackaged}`);
 
 /**
  * Register/clear the OS login item with an EXPLICIT path + args so it
@@ -314,16 +383,39 @@ const startedByAutostart =
  *              the toggle outside the packaged build.)
  *  - macOS:    also `openAsHidden: true`.
  */
-function applyLoginItem(enabled: boolean): void {
-  const args = app.isPackaged
+function loginItemArgs(): string[] {
+  return app.isPackaged
     ? ['--autostart']
     : [path.join(__dirname, 'main.js'), '--autostart'];
+}
+
+function applyLoginItem(enabled: boolean): void {
+  const args = loginItemArgs();
+  dlog(`applyLoginItem(${enabled}) execPath=${process.execPath} args=${JSON.stringify(args)} isPackaged=${app.isPackaged} appName=${app.getName()}`);
   app.setLoginItemSettings({
     openAtLogin: enabled,
     openAsHidden: true, // macOS-only flag, ignored on Windows
     path: process.execPath,
     args,
   });
+  // Read back via BOTH variants to see where Electron actually wrote.
+  const withCustom = app.getLoginItemSettings({ path: process.execPath, args }).openAtLogin;
+  const withDefault = app.getLoginItemSettings().openAtLogin;
+  dlog(`  → openAtLogin (custom path/args): ${withCustom}; (default no args): ${withDefault}`);
+}
+
+/**
+ * Read the current login-item state. We MUST pass the same `path`+`args`
+ * we wrote with — otherwise Electron's Windows backend compares against
+ * `process.execPath` + empty args, sees a mismatch, and returns
+ * `openAtLogin: false` even when the registry entry exists. That was the
+ * "checkbox flicks on and immediately off" bug.
+ */
+function getLoginItemState(): boolean {
+  return app.getLoginItemSettings({
+    path: process.execPath,
+    args: loginItemArgs(),
+  }).openAtLogin;
 }
 
 function registerIpc(): void {
@@ -346,10 +438,12 @@ function registerIpc(): void {
 
   // Autostart toggle — registers an explicit headless command (see
   // applyLoginItem). "system" wording (not "Windows") for portability.
-  ipcMain.handle('desktop:get-autostart', () => app.getLoginItemSettings().openAtLogin);
+  // Both get + set use `getLoginItemState()` which queries with the
+  // matching path/args (see comment there).
+  ipcMain.handle('desktop:get-autostart', () => getLoginItemState());
   ipcMain.handle('desktop:set-autostart', (_e, enabled: boolean) => {
     applyLoginItem(Boolean(enabled));
-    return app.getLoginItemSettings().openAtLogin;
+    return getLoginItemState();
   });
   // The Settings UI disables the autostart toggle outside the packaged
   // build (dev autostart can't render the overlay — no Vite at login).
