@@ -224,6 +224,12 @@ export function useAttachCategoryToGoal() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['goals'] });
+      // The SQL trigger `goal_category_cascade` rewrites task_category_links
+      // for every micro-task linked to this goal. Invalidate so the
+      // dashboard/overlay reflects the new category set without waiting
+      // for the per-widget polling refetch.
+      void queryClient.invalidateQueries({ queryKey: ['microTasks'] });
+      void queryClient.invalidateQueries({ queryKey: ['quickSwitcher'] });
     },
   });
 }
@@ -237,6 +243,10 @@ export function useDetachCategoryFromGoal() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['goals'] });
+      // Same as attach: the SQL trigger cascades the removal to linked
+      // micro-tasks, so refresh their cache too.
+      void queryClient.invalidateQueries({ queryKey: ['microTasks'] });
+      void queryClient.invalidateQueries({ queryKey: ['quickSwitcher'] });
     },
   });
 }

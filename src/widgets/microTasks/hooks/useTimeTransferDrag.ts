@@ -243,15 +243,20 @@ export function useTimeTransferDrag({
         const finalMinutes = clampTransferMinutes(reqMins, avail);
         pendingRef.current = null;
         setState(null);
-        if (
-          result === 'ok' &&
+        // `too_much` now commits at the clamped value (whole-minutes worth of
+        // what the source actually has) instead of rejecting outright. That
+        // handles "I have 16:00 displayed, I type 16, but elapsed_seconds is
+        // really 959" — the user's intent is clearly "transfer all of it",
+        // so we transfer 15 minutes silently instead of giving up.
+        const commitable =
+          (result === 'ok' || result === 'too_much') &&
           finalMinutes > 0 &&
           current.hoveredTargetId &&
-          current.hoveredTargetId !== current.sourceTaskId
-        ) {
+          current.hoveredTargetId !== current.sourceTaskId;
+        if (commitable) {
           const op: TransferOp = {
             fromTaskId: current.sourceTaskId,
-            toTaskId: current.hoveredTargetId,
+            toTaskId: current.hoveredTargetId!,
             seconds: finalMinutes * 60,
             appliedAt: Date.now(),
           };
@@ -264,8 +269,11 @@ export function useTimeTransferDrag({
             const stack = undoStackRef.current;
             stack.push(op);
             if (stack.length > UNDO_STACK_LIMIT) stack.shift();
-          } catch {
-            // mutation hook already rolled back its optimistic state
+          } catch (err) {
+            // Mutation hook already rolled back its optimistic state. Log
+            // the cause so future "drop did nothing" reports are easier to
+            // diagnose than the silent catch we used to have.
+            console.warn('[time-transfer] commit failed', err);
           }
         }
         return;

@@ -10,6 +10,7 @@ import { SettingsModal } from '../components/SettingsModal';
 import { useBootstrapDashboard } from '../features/dashboards/hooks';
 import type { WidgetRecord } from '../features/dashboards/types';
 import { updateWidgetConfig } from '../features/dashboards/api';
+import { useMicroTasksRealtime } from '../features/microTasks/hooks';
 import { useSyncProfileTimezone } from '../features/profile/hooks';
 import { useVoiceRealtime } from '../features/voice/useVoiceRealtime';
 import { VoiceToastView } from '../features/voice/VoiceToast';
@@ -92,6 +93,10 @@ export function DashboardShell() {
   const userId = user?.id ?? null;
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   useSyncProfileTimezone(userId);
+  // Realtime subscription on micro_tasks — keeps goal timers, microtask
+  // lists, and the quick-switcher overlay in sync across tabs/devices/
+  // voice webhooks without waiting for the 10s polling tick.
+  useMicroTasksRealtime(userId);
   const { toast: voiceToast, dismissToast: dismissVoiceToast } = useVoiceRealtime(userId);
   const {
     data: bootstrap,
@@ -123,11 +128,11 @@ export function DashboardShell() {
   const { mutate: persistWidgetConfig } = useMutation({
     mutationFn: ({
       widgetId,
-      config,
+      patch,
     }: {
       widgetId: string;
-      config: Record<string, unknown>;
-    }) => updateWidgetConfig(widgetId, config),
+      patch: Record<string, unknown>;
+    }) => updateWidgetConfig(widgetId, patch),
   });
 
   const handleWidgetConfigPatch = useCallback(
@@ -141,6 +146,13 @@ export function DashboardShell() {
       // the same stale `widget.config` and the second call would overwrite the
       // first. Falling back to the captured `widget` keeps the first-load path
       // working before the cache is primed.
+      //
+      // NOTE: the optimistic merge below is for INSTANT UI feedback only. The
+      // actual server write sends ONLY `patch` (not the full merged config)
+      // and Postgres does an atomic JSONB shallow merge via `patch_widget_config`
+      // RPC, so even a stale local cache can never overwrite other keys on the
+      // server — the cross-tab race that nuked ritual progress in Phase 5 is
+      // closed at the database layer now.
       const cachedWidgets = queryClient.getQueryData<WidgetRecord[]>(['widgets', dashboardId]);
       const cachedBootstrap = queryClient.getQueryData<typeof bootstrap>(['dashboard', userId]);
       const latestWidget =
@@ -148,8 +160,8 @@ export function DashboardShell() {
         cachedBootstrap?.widgets.find((entry) => entry.id === widgetId) ??
         widget;
 
-      const nextConfig = { ...(latestWidget.config ?? {}), ...patch };
-      const optimistic: WidgetRecord = { ...latestWidget, config: nextConfig };
+      const optimisticConfig = { ...(latestWidget.config ?? {}), ...patch };
+      const optimistic: WidgetRecord = { ...latestWidget, config: optimisticConfig };
 
       queryClient.setQueryData(['dashboard', userId], (prev: typeof bootstrap | undefined) => {
         if (!prev) return prev;
@@ -165,8 +177,31 @@ export function DashboardShell() {
       });
 
       persistWidgetConfig(
-        { widgetId, config: nextConfig },
+        { widgetId, patch },
         {
+          onSuccess: (serverWidget) => {
+            // The server returns the authoritative post-merge row. Replace
+            // the optimistic cache with it — if our local cache was stale,
+            // the server preserved other keys via the JSONB shallow merge
+            // and that truth lands here.
+            if (!serverWidget) return;
+            queryClient.setQueryData(
+              ['dashboard', userId],
+              (prev: typeof bootstrap | undefined) => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  widgets: prev.widgets.map((entry) =>
+                    entry.id === widgetId ? serverWidget : entry,
+                  ),
+                };
+              },
+            );
+            queryClient.setQueryData(['widgets', dashboardId], (prev?: WidgetRecord[]) => {
+              if (!prev) return prev;
+              return prev.map((entry) => (entry.id === widgetId ? serverWidget : entry));
+            });
+          },
           onError: () => {
             queryClient.invalidateQueries({ queryKey: ['dashboard', userId] });
             queryClient.invalidateQueries({ queryKey: ['widgets', dashboardId] });

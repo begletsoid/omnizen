@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { INTENT_REGISTRY } from '../intents';
+import { INTENT_REGISTRY, normalizeTitleForMatch } from '../intents';
 
 describe('INTENT_REGISTRY shape', () => {
   it('contains all Phase 2 intents', () => {
@@ -146,5 +146,37 @@ describe('add_goal.validatePayload', () => {
 describe('undo_last.validatePayload', () => {
   it('accepts empty object', () => {
     expect(INTENT_REGISTRY.undo_last.validatePayload({})).toEqual({});
+  });
+});
+
+describe('normalizeTitleForMatch (resume-dedup helper)', () => {
+  it('trims surrounding whitespace', () => {
+    expect(normalizeTitleForMatch('  Делаю код-ревью  ')).toBe('делаю код-ревью');
+  });
+
+  it('lower-cases for case-insensitive equality', () => {
+    expect(normalizeTitleForMatch('Делаю КОД-Ревью')).toBe('делаю код-ревью');
+  });
+
+  it('returns "" for empty / whitespace / null / undefined', () => {
+    expect(normalizeTitleForMatch('')).toBe('');
+    expect(normalizeTitleForMatch('   ')).toBe('');
+    expect(normalizeTitleForMatch(null)).toBe('');
+    expect(normalizeTitleForMatch(undefined)).toBe('');
+  });
+
+  it('ignores non-string types', () => {
+    // The DB column is text; if something other than a string ever shows
+    // up the helper should not throw, just return ''.
+    expect(normalizeTitleForMatch(123 as unknown as string)).toBe('');
+  });
+
+  it('treats two payloads as equal when they normalise identically', () => {
+    // This is what the resume-dedup guard relies on:
+    // `normalize(spoken_phrase) === normalize(stored_title)`.
+    expect(normalizeTitleForMatch('Обед'))
+      .toBe(normalizeTitleForMatch('  обед'));
+    expect(normalizeTitleForMatch('Code Review'))
+      .not.toBe(normalizeTitleForMatch('Code Review 2'));
   });
 });

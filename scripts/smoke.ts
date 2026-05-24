@@ -103,6 +103,7 @@ let goalsWidgetId: string | null = null;
     }
     if (goalsWidgetId && microTasksWidgetId) {
       await runHeatmapSmoke(goalsWidgetId, microTasksWidgetId, userId);
+      await runGoalCategoryCascadeSmoke(goalsWidgetId, microTasksWidgetId, userId);
     }
     if (microTasksWidgetId) {
       await runEodCleanupSmoke(microTasksWidgetId, userId);
@@ -515,6 +516,133 @@ async function runGoalsReorderSmoke(widgetId: string, userId: string) {
   if (afterReorder.some((g, idx) => g.sort_order !== expectedPositions[idx])) {
     throw new Error('reorder_goals did not normalize sort_order values');
   }
+}
+
+async function runGoalCategoryCascadeSmoke(
+  goalsWidgetId: string,
+  microWidgetId: string,
+  userId: string,
+) {
+  // Validates the `goal_category_cascade` trigger on goal_category_links:
+  // attach 2 categories to a goal → a micro-task with that goal_id ends up
+  // with both categories. Detach one → micro-task loses it too. Pure
+  // server-side: we never call the JS attach/detach helpers — just
+  // INSERT/DELETE on goal_category_links and read back the result.
+  if (!supabase) throw new Error('Supabase client missing');
+
+  // Clean slate just in case earlier smokes left rows.
+  await supabase.from('goals').delete().eq('widget_id', goalsWidgetId);
+  await supabase.from('micro_tasks').delete().eq('widget_id', microWidgetId);
+  await supabase.from('task_categories').delete().eq('user_id', userId);
+
+  // 1. Create the goal.
+  const goalInsert = await supabase
+    .from('goals')
+    .insert({
+      widget_id: goalsWidgetId,
+      user_id: userId,
+      title: 'Goal cascade smoke',
+      sort_order: 1,
+    })
+    .select('id')
+    .single();
+  if (goalInsert.error || !goalInsert.data) throw goalInsert.error;
+  const goalId = goalInsert.data.id as string;
+
+  // 2. Create two categories.
+  const catInsert = await supabase
+    .from('task_categories')
+    .insert([
+      { user_id: userId, name: 'Cascade Cat A', is_auto: false },
+      { user_id: userId, name: 'Cascade Cat B', is_auto: false },
+    ])
+    .select('id');
+  if (catInsert.error || !catInsert.data || catInsert.data.length !== 2) {
+    throw catInsert.error ?? new Error('cascade smoke: category insert');
+  }
+  const [catA, catB] = catInsert.data.map((c) => c.id as string);
+
+  // 3. Attach BOTH categories to the goal. After this the trigger has
+  //    nothing to sync — no micro-task has this goal yet — but the link
+  //    rows are in place for steps 4-5.
+  const linkInsert = await supabase
+    .from('goal_category_links')
+    .insert([
+      { goal_id: goalId, category_id: catA },
+      { goal_id: goalId, category_id: catB },
+    ]);
+  if (linkInsert.error) throw linkInsert.error;
+
+  // 4. Create a micro-task attached to this goal. The trigger ALSO fires
+  //    on the next link-table change, so to seed the task's categories we
+  //    re-touch one of the links (delete+insert is a clean way). Simpler:
+  //    update one row, but link rows have a composite PK with no payload.
+  //    Easiest: insert the task, then re-insert one link to trigger sync.
+  const taskInsert = await supabase
+    .from('micro_tasks')
+    .insert({
+      widget_id: microWidgetId,
+      user_id: userId,
+      title: 'Cascade task',
+      goal_id: goalId,
+      order: 1,
+      elapsed_seconds: 0,
+      timer_state: 'never',
+    })
+    .select('id')
+    .single();
+  if (taskInsert.error || !taskInsert.data) throw taskInsert.error;
+  const taskId = taskInsert.data.id as string;
+
+  // Re-poke the link table so the cascade trigger sees the task and
+  // creates its task_category_links.
+  await supabase
+    .from('goal_category_links')
+    .delete()
+    .eq('goal_id', goalId)
+    .eq('category_id', catB);
+  const reattach = await supabase
+    .from('goal_category_links')
+    .insert({ goal_id: goalId, category_id: catB });
+  if (reattach.error) throw reattach.error;
+
+  // 5. Verify: the task should now be linked to BOTH categories.
+  const linksAfterAttach = await supabase
+    .from('task_category_links')
+    .select('category_id')
+    .eq('task_id', taskId);
+  if (linksAfterAttach.error) throw linksAfterAttach.error;
+  const attachedIds = new Set(
+    (linksAfterAttach.data ?? []).map((r) => r.category_id as string),
+  );
+  if (!attachedIds.has(catA) || !attachedIds.has(catB) || attachedIds.size !== 2) {
+    throw new Error(
+      `cascade smoke: expected task to have catA+catB, got ${[...attachedIds].join(',')}`,
+    );
+  }
+
+  // 6. Detach catA from the goal. Trigger should remove it from the task.
+  const detach = await supabase
+    .from('goal_category_links')
+    .delete()
+    .eq('goal_id', goalId)
+    .eq('category_id', catA);
+  if (detach.error) throw detach.error;
+
+  const linksAfterDetach = await supabase
+    .from('task_category_links')
+    .select('category_id')
+    .eq('task_id', taskId);
+  if (linksAfterDetach.error) throw linksAfterDetach.error;
+  const remainingIds = (linksAfterDetach.data ?? []).map((r) => r.category_id as string);
+  if (remainingIds.length !== 1 || remainingIds[0] !== catB) {
+    throw new Error(
+      `cascade smoke: after detach expected only catB, got [${remainingIds.join(',')}]`,
+    );
+  }
+
+  // Cleanup — let the outer finally wipe widgets; we only created rows
+  // under this user, which the user-delete cascade will sweep.
 }
 
 async function runEodCleanupSmoke(microWidgetId: string, userId: string) {

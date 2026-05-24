@@ -148,9 +148,36 @@ export async function deleteMicroTaskGroupTemplate(templateId: string, userId: s
   if (error) throw error;
 }
 
-export async function createMicroTask(payload: MicroTaskInsert) {
+/**
+ * Create a micro-task. When `start_timer: true`, the row is inserted AND
+ * its timer is started atomically server-side (via the
+ * `create_micro_task_with_start` RPC). That closes the race where the
+ * client tried to call `start_micro_task_timer(temp-id)` against a row
+ * the server didn't have yet — see commit a033fa9+ for context.
+ */
+export async function createMicroTask(
+  payload: MicroTaskInsert & { start_timer?: boolean },
+) {
   const client = requireSupabase();
-  return client.from('micro_tasks').insert(payload).select('*').single();
+  const { start_timer, ...row } = payload;
+  if (!start_timer) {
+    return client.from('micro_tasks').insert(row).select('*').single();
+  }
+  // RPC path. Mirrors the column set the JS insert uses; extra fields
+  // like `last_started_at` / `archived_at` are server-managed and we
+  // don't pass them.
+  const { data, error } = await client.rpc('create_micro_task_with_start', {
+    p_widget_id: row.widget_id,
+    p_user_id: row.user_id,
+    p_title: row.title,
+    p_order: row.order ?? 1,
+    p_start_timer: true,
+    p_group_id: row.group_id ?? null,
+    p_group_order: row.group_order ?? null,
+    p_goal_id: row.goal_id ?? null,
+  });
+  // Match the .single() return shape so the call site stays uniform.
+  return { data: data as MicroTaskRecord | null, error };
 }
 
 export async function updateMicroTask(id: string, payload: MicroTaskUpdate) {

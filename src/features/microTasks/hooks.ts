@@ -1,8 +1,10 @@
+import { useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { nanoid } from 'nanoid';
 
 import { supabase } from '../../lib/supabaseClient';
 import { useAuthStore } from '../../stores/authStore';
+import { subscribeMicroTasks } from './realtime';
 import {
   acknowledgeCategoriesIntroduction,
   attachCategoriesToTask,
@@ -59,6 +61,74 @@ import type {
 import { normalizeTimerState } from './utils';
 
 const DATA_REFETCH_INTERVAL_MS = 10_000;
+
+/**
+ * State shared between `useCreateMicroTask` (the writer) and
+ * `useToggleMicroTaskTimer` (the toggler) for the create+start race:
+ *
+ *   - User hits "+" → `useCreateMicroTask.onMutate` puts a `temp-…` task
+ *     in the cache and stashes its optimistic id in `optimisticIdByPayload`
+ *     keyed on the mutate payload object.
+ *   - In `mutationFn` we FIRST classify categories via LLM (~1-2s).
+ *     During this window the `temp-…` row is visible to the user — this
+ *     IS the click window.
+ *   - If the user clicks ▶ on that row, `useToggleMicroTaskTimer` sees a
+ *     temp id, ADDS the id to `pendingTimerStarts`, and skips both the
+ *     server RPC (it would fail — no such id server-side yet) and the
+ *     query invalidation (refetch would clobber the optimistic running
+ *     state). The cache update from its own `onMutate` already shows
+ *     the timer ticking for the user.
+ *   - AFTER the LLM await, `useCreateMicroTask.mutationFn` reads the
+ *     optimisticId via the WeakMap, checks `pendingTimerStarts.has(id)`,
+ *     and asks the server to insert + start the timer atomically via
+ *     `start_timer: true`. The row returned is already in the running
+ *     state — the merge in `onSuccess` no longer wipes out the user's
+ *     click. Reading BEFORE the LLM await (old behaviour) missed every
+ *     click that landed during classification — that was the regression
+ *     fixed in Phase 6.
+ */
+const pendingTimerStarts = new Set<string>();
+const optimisticIdByPayload = new WeakMap<object, string>();
+
+/**
+ * Subscribe to Supabase Realtime for micro_tasks owned by this user.
+ *
+ * Mount this once at the dashboard root (not inside individual widgets)
+ * so a single channel covers every consumer of `['microTasks']` and
+ * `['goals']`. On any INSERT/UPDATE/DELETE we invalidate the relevant
+ * caches; React Query will refetch only the queries that have active
+ * subscribers, so the cost is paid by whoever is actually visible.
+ *
+ * The local mutations already do their own optimistic+invalidate cycle
+ * (and in Phase 6 we added explicit `['goals']` invalidates to micro
+ * mutations). This hook closes the *cross-source* hole: another tab,
+ * another device, the iPhone voice webhook, or the Electron quick-
+ * switcher overlay can all change micro_tasks state, and now those
+ * sessions update this one within ~500ms instead of ~10s.
+ *
+ * Requires `micro_tasks` to be in the `supabase_realtime` publication
+ * (migration `20260513000000_realtime_microtasks.sql`).
+ */
+export function useMicroTasksRealtime(userId: string | null) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!userId || !supabase) return undefined;
+    const unsubscribe = subscribeMicroTasks(userId, (payload) => {
+      void queryClient.invalidateQueries({ queryKey: ['microTasks'] });
+      // Cross-source mutation may have touched a goal-linked task,
+      // changed elapsed_seconds, or deleted/added a row that affects
+      // `useGoals.elapsedByGoal`. Cheap to invalidate; the goals
+      // queryFn already pulls the freshest micro_tasks aggregation.
+      void queryClient.invalidateQueries({ queryKey: ['goals'] });
+      // The desktop quick-switcher overlay lists tasks across all widgets;
+      // keep its cache in sync too.
+      void queryClient.invalidateQueries({ queryKey: ['quickSwitcher'] });
+      // payload is currently unused — kept for future surgical invalidates.
+      void payload;
+    });
+    return unsubscribe;
+  }, [queryClient, userId]);
+}
 
 export function useMicroTasks(widgetId: string | null) {
   const enabled = Boolean(widgetId && supabase);
@@ -255,15 +325,11 @@ export function useCreateMicroTask(widgetId: string | null) {
       if (!user) throw new Error('User not authenticated');
       const { category_ids_override, ...insertData } = payload;
       const order = await fetchNextMicroTaskOrder(widgetId);
-      const { data, error } = await createMicroTask({
-        widget_id: widgetId,
-        user_id: user.id,
-        order,
-        ...insertData,
-      });
-      if (error) throw error;
 
-      // Category resolution priority:
+      // Category resolution priority (resolved BEFORE the INSERT so the
+      // LLM-classify wait gives the user a window to press ▶ on the
+      // optimistic temp-row — we read `pendingTimerStarts` below AFTER
+      // this await):
       //   1. Explicit override (e.g. dropping a goal onto the widget → use goal's categories).
       //   2. LLM classification by title (same Groq/Anthropic/OpenAI chain as voice).
       //   3. Buffer fallback (the user's "default set" of categories).
@@ -275,6 +341,26 @@ export function useCreateMicroTask(widgetId: string | null) {
         const llmIds = await classifyMicrotaskCategories(insertData.title);
         categoriesToAttach = llmIds.length > 0 ? llmIds : (bufferedCategoryIds ?? []);
       }
+
+      // Read `pendingTimerStarts` AFTER the LLM await — the 1-2s LLM
+      // window is exactly when the user has time to see the temp-row and
+      // press ▶ on it. Reading before the await (old behaviour) missed
+      // every click that happened during classification. See the comment
+      // on `pendingTimerStarts` at module top for the race this closes.
+      const tempId = optimisticIdByPayload.get(payload);
+      const wantsStartTimer = tempId ? pendingTimerStarts.has(tempId) : false;
+      if (tempId) pendingTimerStarts.delete(tempId);
+
+      const { data, error } = await createMicroTask({
+        widget_id: widgetId,
+        user_id: user.id,
+        order,
+        ...insertData,
+        start_timer: wantsStartTimer,
+      });
+      if (error) throw error;
+      if (!data) throw new Error('createMicroTask returned no row');
+
       if (categoriesToAttach.length > 0) {
         await attachCategoriesToTask(data.id, categoriesToAttach, user.id);
       } else {
@@ -298,6 +384,10 @@ export function useCreateMicroTask(widgetId: string | null) {
           ? Math.max(...previous.map((task) => task.order)) + 1
           : 1;
       const optimisticId = `temp-${nanoid()}`;
+      // Make the optimisticId visible to `mutationFn` (which runs after
+      // onMutate but doesn't receive context) via a WeakMap keyed on the
+      // mutate payload — same object reference both callbacks see.
+      optimisticIdByPayload.set(variables, optimisticId);
       const optimisticTask: MicroTaskRecord = {
         id: optimisticId,
         widget_id: widgetId,
@@ -329,6 +419,10 @@ export function useCreateMicroTask(widgetId: string | null) {
         return old.map((task) => (task.id === context?.optimisticId ? data : task));
       });
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // If the new task has a goal_id, the goal card needs to refresh its
+      // aggregated elapsed_seconds and "linked tasks count" right away —
+      // otherwise the user has to wait for the 10s `useGoals` polling tick.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
 }
@@ -367,6 +461,10 @@ export function useUpdateMicroTask(widgetId: string | null) {
     onSettled: () => {
       if (!widgetId) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // Updates may touch elapsed_seconds (inline edit), is_done, goal_id or
+      // archived_at — all of which feed `useGoals` aggregation. Refresh goals
+      // immediately instead of waiting for the 10s poll.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
 }
@@ -402,6 +500,8 @@ export function useDeleteMicroTask(widgetId: string | null) {
     onSettled: () => {
       if (!widgetId) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // Deleting a task drops its elapsed_seconds from any goal aggregation.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
 }
@@ -430,6 +530,11 @@ export function useArchiveMicroTask(widgetId: string | null) {
     onSettled: () => {
       if (!widgetId) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+      // `useGoals` aggregates elapsed_seconds across ALL linked micro tasks
+      // including archived — so archiving doesn't drop time from the goal
+      // card today. Still invalidate defensively in case aggregation rules
+      // ever change, and so the "linked tasks count" reflects the archive.
+      queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
   });
 }
@@ -572,9 +677,20 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
   return useMutation({
     mutationFn: async ({ id, isRunning }: { id: string; isRunning: boolean }) => {
       if (!user) throw new Error('User not authenticated');
-      if (isRunning) {
-        return pauseMicroTaskTimer(id);
+      // The row hasn't actually been created on the server yet — it's
+      // the optimistic placeholder from useCreateMicroTask. Calling
+      // start/pause RPC with a temp id would 404. Instead we stash the
+      // user's intent in `pendingTimerStarts`; useCreateMicroTask reads
+      // it just before sending the INSERT and asks the server to insert
+      // + start the timer atomically (see `start_timer` param). The
+      // optimistic onMutate update already shows the timer running, so
+      // the user sees no delay.
+      if (id.startsWith('temp-')) {
+        if (isRunning) pendingTimerStarts.delete(id);
+        else pendingTimerStarts.add(id);
+        return null;
       }
+      if (isRunning) return pauseMicroTaskTimer(id);
       return startMicroTaskTimer(id);
     },
     onMutate: async ({ id, isRunning }) => {
@@ -625,8 +741,13 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
       if (!widgetId || !context?.previous) return;
       queryClient.setQueryData(['microTasks', widgetId], context.previous);
     },
-    onSettled: () => {
+    onSettled: (_data, _err, vars) => {
       if (!widgetId) return;
+      // For optimistic temp- rows, the server hasn't done anything yet
+      // (we short-circuited in mutationFn). A refetch here would replace
+      // the optimistic "running" cache with the older "never" row from
+      // the server (or no row at all), erasing the user's click. Skip.
+      if (vars?.id?.startsWith('temp-')) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
       // Goals show aggregate elapsed_seconds across linked micro tasks. Without
       // this invalidation the goal card waits ~10s for the polling refetch

@@ -249,9 +249,12 @@ describe('useTimeTransferDrag', () => {
     document.body.removeChild(target);
   });
 
-  it('drop with too-much request commits clamped value, not the over-amount', async () => {
-    // Source has 10 minutes; user types 100 → should commit 10 (clamped).
-    // Actually the validity goes "too_much" so the drop is rejected outright.
+  it('drop with too-much request commits the clamped value (not the over-amount)', async () => {
+    // Source has 10:00 displayed (600s). User types 100 — they're asking
+    // for way more than exists. Previously the drop was REJECTED outright
+    // ('too_much' returned no-op). New behaviour: clamp to what the source
+    // actually has (10 min = 600s) and commit silently. The amber overlay
+    // colour tells the user the value got clamped.
     const target = document.createElement('div');
     target.setAttribute('data-task-id', 'b');
     document.body.appendChild(target);
@@ -271,7 +274,49 @@ describe('useTimeTransferDrag', () => {
       fireWindow('pointerup', { clientX: 20, clientY: 20 });
       await Promise.resolve();
     });
-    expect(onCommit).not.toHaveBeenCalled();
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith({
+      fromTaskId: 'a',
+      toTaskId: 'b',
+      seconds: 600, // clamped to all available
+    });
+    document.body.removeChild(target);
+  });
+
+  it('drop with exact-available + 1s drift commits clamped value (16/16 with 959s underneath)', async () => {
+    // Real-world scenario: display says "16:00" but elapsed_seconds is
+    // physically 959 (rounded up on display). User types 16. Previously
+    // rejected as too_much (16*60=960 > 959). Now: clamp to 15 (the
+    // whole-minutes worth of 959) and commit.
+    const target = document.createElement('div');
+    target.setAttribute('data-task-id', 'b');
+    document.body.appendChild(target);
+    (document as unknown as { elementFromPoint: (x: number, y: number) => Element | null }).elementFromPoint = () => target;
+
+    // Override getTaskById to return a paused source with 959 stored seconds.
+    const localGetTaskById = vi.fn((id: string) =>
+      id === 'a' ? makeTask({ id: 'a', elapsed_seconds: 959 }) : undefined,
+    );
+
+    const { result } = renderHook(() =>
+      useTimeTransferDrag({ getTaskById: localGetTaskById, onCommit }),
+    );
+    act(() => result.current.beginPress('a', makePointerReact(0, 0)));
+    act(() => fireWindow('pointermove', { clientX: 20, clientY: 20 }));
+    act(() => fireKey('1'));
+    act(() => fireKey('6'));
+    expect(result.current.requestedMinutes).toBe(16);
+    expect(result.current.validity).toBe('too_much');
+    await act(async () => {
+      fireWindow('pointerup', { clientX: 20, clientY: 20 });
+      await Promise.resolve();
+    });
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit).toHaveBeenCalledWith({
+      fromTaskId: 'a',
+      toTaskId: 'b',
+      seconds: 15 * 60, // 15 whole minutes from the 959s available
+    });
     document.body.removeChild(target);
   });
 

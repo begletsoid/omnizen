@@ -1,0 +1,27 @@
+-- Enable Supabase Realtime on micro_tasks.
+--
+-- Why: without Realtime, dashboard tabs only see micro_task changes that
+-- they themselves caused (via local React Query mutations). Cross-tab,
+-- cross-device, and voice-webhook-applied changes show up only on the
+-- 10-second `useMicroTasks` polling tick.
+--
+-- For the use case the user complained about — creating a microtask
+-- linked to a goal and expecting the goal card to refresh INSTANTLY —
+-- the in-tab fix is the `invalidateQueries(['goals'])` adds in Phase 6
+-- (single-source updates). Realtime is the cross-source half: a
+-- microtask created from the iPhone voice webhook, or paused from the
+-- Electron quick-switcher overlay, should also bump every other open
+-- session within ~500ms via the channel below.
+--
+-- `task_category_links` is NOT added here. We considered it for the
+-- goal_category_cascade trigger fan-out, but:
+--   1. That trigger fires DURING a goal-category mutation; the existing
+--      `useAttachCategoryToGoal.onSuccess` already invalidates
+--      `['microTasks']` from the source tab.
+--   2. `task_category_links` has no `user_id` column → Realtime channel
+--      filters per-user would need a join or a downstream filter that
+--      we don't currently support cleanly.
+-- So we rely on the existing invalidation path for goal-cascade and only
+-- publish `micro_tasks` for now.
+
+alter publication supabase_realtime add table public.micro_tasks;

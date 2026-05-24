@@ -20,7 +20,10 @@ type TimeTransferOverlayProps = {
 
 const VALIDITY_CLASSES: Record<TransferValidity, string> = {
   ok: 'border-emerald-400/60 bg-background/90 text-emerald-100',
-  too_much: 'border-rose-400/70 bg-background/90 text-rose-100',
+  // Amber instead of rose: `too_much` no longer rejects the drop — it
+  // commits at the clamped amount. The amber tint signals "I'll move all
+  // I can, not the full number you typed" without looking like an error.
+  too_much: 'border-amber-400/70 bg-background/90 text-amber-100',
   zero: 'border-white/30 bg-background/70 text-muted opacity-60',
   no_target: 'border-white/30 bg-background/80 text-text/80',
   same_task: 'border-white/30 bg-background/70 text-muted opacity-60',

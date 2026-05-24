@@ -125,8 +125,13 @@ export function HabitsWidget({
       if (!snapshot) return;
       const nextValue = normalizeCounterValue(compute(snapshot.fail_count));
       if (nextValue === snapshot.fail_count) return;
+      // Touching the fail counter (✕ left-click, right-click-show, …)
+      // counts as "user interacted with this habit today" — clears the
+      // stale highlight on the ✔ button (see isSuccessCounterStale).
+      // Otherwise the glow stays on even after the user clearly engaged.
       mutateHabitCounters(habitId, {
         fail_count: nextValue,
+        success_updated_at: new Date().toISOString(),
       });
     },
     [getHabitSnapshot, mutateHabitCounters],
@@ -807,8 +812,12 @@ function HabitCounters({ habit, handlers, highlightSuccess }: HabitCountersProps
           }}
           className={clsx(
             'rounded-full px-1 text-sm transition focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/60',
+            // text-shadow renders consistently on WebKit/Safari (incl.
+            // macOS Chrome which uses WebKit-derived rendering for some
+            // filter operations); the previous `drop-shadow` via CSS
+            // filter was inconsistent on macOS — the glow was invisible.
             highlightSuccess
-              ? 'text-white drop-shadow-[0_0_6px_rgba(255,255,255,0.75)]'
+              ? 'text-white [text-shadow:0_0_6px_rgba(255,255,255,0.75)]'
               : 'text-black/70',
           )}
           aria-label="Отметить успех"

@@ -184,6 +184,45 @@ async function pauseRunningTask(
   return running.id as string;
 }
 
+/**
+ * Two titles are considered the "same task" for the resume-dedup guard
+ * when their trimmed, case-folded forms match exactly. Empty / whitespace-
+ * only strings normalise to empty and never match anything else.
+ *
+ * Intentionally NOT fuzzy: typo tolerance / partial matches risk false
+ * positives (treating "Cook" as the same as "Cook dinner"). Conservative
+ * exact-after-normalise is the MVP; fuzzy can be layered on later.
+ */
+export function normalizeTitleForMatch(title: string | null | undefined): string {
+  if (typeof title !== 'string') return '';
+  return title.trim().toLowerCase();
+}
+
+/**
+ * Find an active (not done, not archived) micro-task of `userId` whose
+ * title matches `title` after normalisation. Returns its id, or null.
+ * Used by the create→resume server-side promotion in applyStartMicrotask.
+ */
+async function findDuplicateActiveTaskId(
+  supabase: SupabaseClient,
+  userId: string,
+  title: string,
+): Promise<string | null> {
+  const normalized = normalizeTitleForMatch(title);
+  if (!normalized) return null;
+  const { data, error } = await supabase
+    .from('micro_tasks')
+    .select('id, title')
+    .eq('user_id', userId)
+    .eq('is_done', false)
+    .is('archived_at', null);
+  if (error) throw new Error(`resume-dedup lookup: ${error.message}`);
+  const match = (data ?? []).find(
+    (t) => normalizeTitleForMatch(t.title as string | null) === normalized,
+  );
+  return match ? (match.id as string) : null;
+}
+
 async function applyStartMicrotask(
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
@@ -225,6 +264,35 @@ async function applyStartMicrotask(
       outcome: { applied_task_id: target.id as string, paused_task_id: pausedId },
       summary: { title: 'Возобновлена', body: `«${target.title}». Таймер запущен.` },
     };
+  }
+
+  // ── Server-side resume guard ─────────────────────────────────────────
+  // The LLM is supposed to flip mode='resume' when the user mentions an
+  // already-existing task title, but it routinely picks 'create' for
+  // exact title matches anyway. If there's an active (not-done, not-
+  // archived) micro-task of THIS user whose title — after trim+lower —
+  // equals the new_task_title, transparently promote create→resume.
+  // Fuzzy matching is intentionally OUT of scope here; exact match
+  // (post-normalisation) is the conservative MVP.
+  if (p.mode === 'create' && p.new_task_title) {
+    const matchId = await findDuplicateActiveTaskId(
+      supabase,
+      ctx.userId,
+      p.new_task_title,
+    );
+    if (matchId) {
+      return applyStartMicrotask(
+        supabase,
+        {
+          mode: 'resume',
+          resume_task_id: matchId,
+          new_task_title: null,
+          goal_id: null,
+          category_ids: [],
+        } satisfies StartMicrotaskPayload,
+        ctx,
+      );
+    }
   }
 
   // mode === 'create' ------------------------------------------------------
@@ -411,16 +479,19 @@ async function applyAddGoal(
   const p = payload as AddGoalPayload;
   const widgetId = await resolveTargetGoalsWidget(supabase, ctx);
 
-  // Compute next sort_order so the new goal lands at the bottom.
-  const { data: maxRow, error: maxErr } = await supabase
+  // Insert at the TOP of the list, mirroring the manual createGoal path
+  // (`src/features/tasks/api.ts → fetchMinGoalSortOrder` then `min - 1`).
+  // Previously voice used `max + 1` → the goal landed at the bottom,
+  // which was asymmetric and confusing.
+  const { data: minRow, error: minErr } = await supabase
     .from('goals')
     .select('sort_order')
     .eq('widget_id', widgetId)
-    .order('sort_order', { ascending: false })
+    .order('sort_order', { ascending: true })
     .limit(1)
     .maybeSingle();
-  if (maxErr) throw new Error(`max sort_order lookup: ${maxErr.message}`);
-  const nextOrder = ((maxRow?.sort_order as number | null) ?? 0) + 1;
+  if (minErr) throw new Error(`min sort_order lookup: ${minErr.message}`);
+  const nextOrder = ((minRow?.sort_order as number | null) ?? 0) - 1;
 
   const { data: created, error: insertErr } = await supabase
     .from('goals')

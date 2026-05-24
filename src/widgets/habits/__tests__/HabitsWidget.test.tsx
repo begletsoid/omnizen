@@ -171,6 +171,49 @@ describe('HabitsWidget scroll behavior', () => {
       });
     });
   });
+
+  it('клик ✕ обновляет success_updated_at чтобы галочка перестала "гореть"', async () => {
+    // Stale habit: fail_count > 0 (so ✕ button is rendered) + success
+    // updated yesterday (highlight is on). Clicking ✕ must increment fail
+    // AND stamp success_updated_at so isSuccessCounterStale flips false.
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const habit: HabitRecord = {
+      ...buildHabits(1)[0],
+      id: 'h-stale',
+      status: 'in_progress', // HabitCounters renders only for in_progress
+      fail_count: 2,
+      success_count: 1,
+      success_updated_at: yesterday,
+    };
+    mockHabitsState.data = [habit];
+
+    // getHabitSnapshot reads from the QueryClient cache directly (not the
+    // useHabits mock), so seed the cache before rendering.
+    const client = new QueryClient();
+    client.setQueryData(['habits', 'w1'], [habit]);
+    render(
+      <QueryClientProvider client={client}>
+        <HabitsWidget widgetId="w1" />
+      </QueryClientProvider>,
+    );
+
+    const failButton = await screen.findByLabelText('Отметить провал');
+    fireEvent.click(failButton);
+    expect(updateHabitMock.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'h-stale',
+        fail_count: 3,
+        success_updated_at: expect.any(String),
+      }),
+    );
+    // And: stamped to "now", not yesterday.
+    const lastCall = updateHabitMock.mutate.mock.calls.at(-1)?.[0] as {
+      success_updated_at: string;
+    };
+    expect(new Date(lastCall.success_updated_at).getTime()).toBeGreaterThan(
+      new Date(yesterday).getTime(),
+    );
+  });
 });
 
 function buildHabits(count: number): HabitRecord[] {

@@ -54,13 +54,26 @@ export async function saveLayout(dashboardId: string, layout: WidgetLayoutItem[]
     .single();
 }
 
-export async function updateWidgetConfig(widgetId: string, config: Record<string, unknown>) {
+/**
+ * Patch a widget's config JSON. The second argument is now a PARTIAL
+ * patch — only the keys you want to change. The server merges it into
+ * the existing config via `||` (JSONB shallow merge) atomically, so a
+ * stale-cache caller can't accidentally overwrite other keys (e.g. a
+ * `{collapsed: true}` patch can never touch `state`, fixing the
+ * Phase 6 cross-tab race that nuked ritual progress).
+ *
+ * For widgets that need to replace a whole sub-object (e.g. ritual's
+ * `state`), the client is still responsible for sending the COMPLETE
+ * new sub-object as a top-level key: the shallow merge then swaps
+ * just that key wholesale.
+ */
+export async function updateWidgetConfig(
+  widgetId: string,
+  patch: Record<string, unknown>,
+) {
   if (!supabase) throw new Error('Supabase client unavailable');
   const { data, error } = await supabase
-    .from('widgets')
-    .update({ config })
-    .eq('id', widgetId)
-    .select('*')
+    .rpc('patch_widget_config', { p_widget_id: widgetId, p_patch: patch })
     .single();
 
   if (error) throw error;
