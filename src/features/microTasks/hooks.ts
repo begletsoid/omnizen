@@ -412,12 +412,39 @@ export function useCreateMicroTask(widgetId: string | null) {
       if (!widgetId || !context?.previous) return;
       queryClient.setQueryData(['microTasks', widgetId], context.previous);
     },
-    onSuccess: (data, _vars, context) => {
+    onSuccess: async (data, _vars, context) => {
       if (!widgetId) return;
+
+      // Late-click safety net: even with the LLM-before-check reorder, the
+      // user can press ▶ on the temp-row AFTER our `pendingTimerStarts`
+      // read at the top of mutationFn but BEFORE we get here (the window
+      // between createMicroTask + attachCategoriesToTask + return — up to
+      // ~700ms). In that case the server task came back as 'never' and the
+      // user's optimistic 'running' cache state would be silently
+      // overwritten by the setQueryData below. Detect that case and start
+      // the timer server-side BEFORE invalidating, so the refetch sees
+      // the running state and doesn't snap the UI back to 'never'.
+      const tempId = context?.optimisticId;
+      const lateClick = !!tempId && pendingTimerStarts.has(tempId);
+      if (tempId) pendingTimerStarts.delete(tempId);
+
+      if (lateClick) {
+        try {
+          await startMicroTaskTimer(data.id);
+        } catch (err) {
+          console.warn('late-click startMicroTaskTimer failed', err);
+        }
+      }
+
+      const replacement: MicroTaskRecord = lateClick
+        ? { ...data, timer_state: 'running', last_started_at: new Date().toISOString() }
+        : data;
+
       queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) => {
-        if (!old) return [data];
-        return old.map((task) => (task.id === context?.optimisticId ? data : task));
+        if (!old) return [replacement];
+        return old.map((task) => (task.id === context?.optimisticId ? replacement : task));
       });
+
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
       // If the new task has a goal_id, the goal card needs to refresh its
       // aggregated elapsed_seconds and "linked tasks count" right away —
