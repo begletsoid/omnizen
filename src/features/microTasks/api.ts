@@ -156,10 +156,20 @@ export async function deleteMicroTaskGroupTemplate(templateId: string, userId: s
  * the server didn't have yet — see commit a033fa9+ for context.
  */
 export async function createMicroTask(
-  payload: MicroTaskInsert & { start_timer?: boolean },
+  payload: MicroTaskInsert & {
+    start_timer?: boolean;
+    /**
+     * When the timer is started server-side as part of the INSERT, pretend
+     * it's already been running for this many seconds. Used to compensate
+     * for the LLM-classify + INSERT roundtrip during which the user's
+     * optimistic timer was ticking on the client. See migration
+     * `20260514000000_timer_started_offset.sql`.
+     */
+    started_offset_seconds?: number;
+  },
 ) {
   const client = requireSupabase();
-  const { start_timer, ...row } = payload;
+  const { start_timer, started_offset_seconds, ...row } = payload;
   if (!start_timer) {
     return client.from('micro_tasks').insert(row).select('*').single();
   }
@@ -175,6 +185,7 @@ export async function createMicroTask(
     p_group_id: row.group_id ?? null,
     p_group_order: row.group_order ?? null,
     p_goal_id: row.goal_id ?? null,
+    p_started_offset_seconds: Math.max(0, Math.floor(started_offset_seconds ?? 0)),
   });
   // Match the .single() return shape so the call site stays uniform.
   return { data: data as MicroTaskRecord | null, error };
@@ -235,10 +246,11 @@ export async function reorderMicroTaskItems(params: {
   if (error) throw error;
 }
 
-export async function startMicroTaskTimer(taskId: string) {
+export async function startMicroTaskTimer(taskId: string, startedOffsetSeconds = 0) {
   const client = requireSupabase();
   const { data, error } = await client.rpc('start_micro_task_timer', {
     p_task_id: taskId,
+    p_started_offset_seconds: Math.max(0, Math.floor(startedOffsetSeconds)),
   });
   if (error) throw enhanceRpcError(error, 'start_micro_task_timer');
   return data as MicroTaskRecord;

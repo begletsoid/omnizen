@@ -77,10 +77,53 @@ export function HabitsWidget({
   const deleteHabit = useDeleteHabit(widgetId ?? null);
   const queryClient = useQueryClient();
   const habitsQueryKey = useMemo(() => ['habits', widgetId], [widgetId]);
+  // Habit day starts at 4:00 AM local time — anything clicked before that
+  // counts toward the previous day's habits (matches morning-routine
+  // intuition: "I'm finishing yesterday's day until I get out of bed").
+  //
+  // `dayMarker` is bumped by a setTimeout that fires at the next 4 AM
+  // boundary so the "stale = burning" highlight refreshes WITHOUT the user
+  // having to reload the page. Default React would otherwise compute
+  // `startOfTodayMs` once on mount and keep using yesterday's boundary
+  // forever after midnight.
+  const [dayMarker, setDayMarker] = useState(0);
   const startOfTodayMs = useMemo(() => {
+    void dayMarker; // dep: bumped to recompute at the day-rollover
     const baseline = new Date();
-    baseline.setHours(0, 0, 0, 0);
+    baseline.setHours(4, 0, 0, 0);
+    if (Date.now() < baseline.getTime()) {
+      // It's before 4 AM today → the current habit day actually started
+      // at 4 AM YESTERDAY.
+      baseline.setDate(baseline.getDate() - 1);
+    }
     return baseline.getTime();
+  }, [dayMarker]);
+
+  useEffect(() => {
+    const now = new Date();
+    const nextRollover = new Date(now);
+    nextRollover.setHours(4, 0, 0, 0);
+    if (nextRollover.getTime() <= now.getTime()) {
+      nextRollover.setDate(nextRollover.getDate() + 1);
+    }
+    const delay = nextRollover.getTime() - now.getTime();
+    const timer = setTimeout(() => setDayMarker((n) => n + 1), delay);
+    return () => clearTimeout(timer);
+  }, [dayMarker]);
+
+  // Also refresh on tab-focus / window-focus: setTimeout in a background
+  // tab can drift or be throttled by the browser, so a user opening the
+  // app after a long sleep might briefly see yesterday's habit day. A
+  // cheap focus listener bumps `dayMarker` to recompute startOfTodayMs
+  // against the wall clock immediately.
+  useEffect(() => {
+    const onFocus = () => setDayMarker((n) => n + 1);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
   }, []);
 
   const getHabitSnapshot = useCallback(

@@ -19,6 +19,9 @@ dist-ssr
 .netlify
 .supabase
 coverage
+# Playwright e2e artifacts
+test-results
+playwright-report
 *.tmp
 .cursor/
 # Claude Code per-agent git worktrees (full repo copies — never commit)

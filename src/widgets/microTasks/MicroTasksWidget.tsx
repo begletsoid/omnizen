@@ -155,14 +155,56 @@ function buildE2eSeed(): { tasks: MicroTaskRecord[]; groups: MicroTaskGroup[] } 
   };
 }
 
+/**
+ * A flat list of N ungrouped tasks for the scroll-jump e2e test
+ * (Phase 7.4 / Bug F). Enough rows to overflow the viewport so we can
+ * scroll to the bottom, complete the last task, and assert the page
+ * doesn't jump. Triggered by a `#e2e-many` (or `#e2e:<count>`) hash.
+ */
+function buildE2eManySeed(count: number): { tasks: MicroTaskRecord[]; groups: MicroTaskGroup[] } {
+  const now = new Date().toISOString();
+  const tasks: MicroTaskRecord[] = Array.from({ length: count }, (_, i) => ({
+    id: `task-${i + 1}`,
+    widget_id: 'e2e',
+    user_id: 'e2e',
+    title: `Задача ${i + 1}`,
+    is_done: false,
+    order: i + 1,
+    group_id: null,
+    group_order: null,
+    elapsed_seconds: 0,
+    timer_state: 'paused',
+    last_started_at: null,
+    archived_at: null,
+    created_at: now,
+    updated_at: now,
+    categories: [],
+  }));
+  return { groups: [], tasks };
+}
+
+/**
+ * Resolve the e2e seed from the URL hash:
+ *   #e2e            → small mixed seed (groups + tasks)
+ *   #e2e-many       → 40 flat tasks (overflow viewport)
+ *   #e2e:<count>    → <count> flat tasks
+ */
+function resolveE2eSeed(hash: string): { tasks: MicroTaskRecord[]; groups: MicroTaskGroup[] } {
+  const countMatch = hash.match(/e2e[:-](\d+)/);
+  if (countMatch) return buildE2eManySeed(Math.max(1, Number(countMatch[1])));
+  if (hash.includes('e2e-many')) return buildE2eManySeed(40);
+  return buildE2eSeed();
+}
+
 export function MicroTasksWidget({
   widgetId,
   config,
   onUpdateConfig,
 }: MicroTasksWidgetProps) {
   const e2eMode = typeof window !== 'undefined' && window.location.hash.includes('e2e');
-  const [e2eTasks, setE2eTasks] = useState<MicroTaskRecord[]>(() => e2eMode ? buildE2eSeed().tasks : []);
-  const [e2eGroups, setE2eGroups] = useState<MicroTaskGroup[]>(() => e2eMode ? buildE2eSeed().groups : []);
+  const e2eHash = typeof window !== 'undefined' ? window.location.hash : '';
+  const [e2eTasks, setE2eTasks] = useState<MicroTaskRecord[]>(() => e2eMode ? resolveE2eSeed(e2eHash).tasks : []);
+  const [e2eGroups, setE2eGroups] = useState<MicroTaskGroup[]>(() => e2eMode ? resolveE2eSeed(e2eHash).groups : []);
 
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
@@ -174,12 +216,102 @@ export function MicroTasksWidget({
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const crossDragCtx = (() => { try { return useCrossWidgetDrag(); } catch { return null; } })();
   const dropZoneRef = useRef<HTMLElement | null>(null);
+  // Cancel handle for the in-flight completion scroll-pin loop (Bug F).
+  // Completing a task floats it to the top of its section, shifting the
+  // list; the browser then jumps the page to chase the moved row / shifted
+  // content. pinScrollDuringCompletion keeps a stable neighbor row's
+  // viewport position fixed for a few frames after the reorder, overriding
+  // any native scroll. This holds the cancel fn so a rapid second
+  // completion supersedes the previous pin instead of stacking.
+  const scrollPinCancelRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!crossDragCtx || !widgetId) return;
     crossDragCtx.registerDropZone(widgetId, dropZoneRef.current);
     return () => crossDragCtx.registerDropZone(widgetId, null);
   }, [crossDragCtx, widgetId]);
+
+  // Cancel any in-flight scroll-pin loop when the widget unmounts.
+  useEffect(() => () => scrollPinCancelRef.current?.(), []);
+
+  /**
+   * Bug F fix — keep the viewport visually still across a completion
+   * reorder. Completing a task floats it to the top of its section, which
+   * shifts the list and makes the browser jump the page (to chase the
+   * moved row's focus and/or the shifted content) when the task leaves the
+   * viewport. We pick a stable neighbor row (the one just above the
+   * completed task, or just below if it's first), record its viewport top,
+   * then re-assert that position on every animation frame until the layout
+   * settles — overriding whatever the browser tries to do.
+   *
+   * Per-frame (not one-shot) because the reorder can land across several
+   * renders (optimistic update, then the onSettled refetch), at different
+   * times in prod vs e2e. The loop waits for the shift to actually happen
+   * (first correction) and only then counts "settled" frames, with a hard
+   * ~700ms cap so it never fights a manually-scrolling user for long.
+   */
+  const pinScrollDuringCompletion = useCallback((pivotTaskId: string) => {
+    const container = dropZoneRef.current;
+    if (!container) return;
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('[data-task-id]'));
+    const idx = rows.findIndex((row) => row.dataset.taskId === pivotTaskId);
+    if (idx === -1) return;
+    const anchor = rows[idx - 1] ?? rows[idx + 1] ?? null;
+    if (!anchor) return;
+
+    // Find the actual scroll container. This app sets `overflow-x: hidden`
+    // on html/body, which by CSS spec makes overflow-y compute to `auto` —
+    // so the real vertical scroller is usually <body>, NOT the window.
+    // Using window.scrollBy here was a no-op (part of why earlier Bug F
+    // attempts failed). Walk up to the first ancestor that actually
+    // scrolls; fall back to the document scrolling element.
+    const findScroller = (from: HTMLElement): HTMLElement => {
+      let el: HTMLElement | null = from.parentElement;
+      while (el && el !== document.documentElement) {
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+      return (document.scrollingElement as HTMLElement | null) ?? document.documentElement;
+    };
+    const scroller = findScroller(anchor);
+    const beforeTop = anchor.getBoundingClientRect().top;
+
+    // Supersede any previous pin (rapid successive completions).
+    scrollPinCancelRef.current?.();
+
+    let rafId = 0;
+    let stableFrames = 0;
+    let corrected = false;
+    const start = performance.now();
+    const tick = () => {
+      const afterTop = anchor.getBoundingClientRect().top;
+      const delta = afterTop - beforeTop;
+      if (Math.abs(delta) > 0.5) {
+        scroller.scrollTop += delta;
+        corrected = true;
+        stableFrames = 0;
+      } else {
+        stableFrames += 1;
+      }
+      const elapsed = performance.now() - start;
+      // Stop only after we've actually corrected a shift AND it's been
+      // stable for a few frames, or after the hard cap (covers the case
+      // where the reorder somehow never shifts the anchor).
+      if ((corrected && stableFrames >= 4) || elapsed > 700) {
+        scrollPinCancelRef.current = null;
+        return;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    scrollPinCancelRef.current = () => {
+      cancelAnimationFrame(rafId);
+      scrollPinCancelRef.current = null;
+    };
+  }, []);
 
   const { data: rawTasks = [], isLoading, isError, error } = useMicroTasks(e2eMode ? null : widgetId);
   const { data: groups = [] } = useMicroTaskGroups(e2eMode ? null : widgetId);
@@ -734,8 +866,16 @@ export function MicroTasksWidget({
     if (!widgetId) return;
     const title = newTaskTitle.trim();
     if (!title) return;
-    await createTask.mutateAsync({ title });
+    // Clear the input BEFORE awaiting the mutation: the LLM-classify +
+    // INSERT takes 1-3s and the user wants to type the next task name
+    // immediately, not wait for the previous one to commit. The optimistic
+    // temp-row already gives them visual confirmation.
     setNewTaskTitle('');
+    try {
+      await createTask.mutateAsync({ title });
+    } catch (err) {
+      console.warn('Failed to create micro task', err);
+    }
   };
 
   const handleCreateGroup = async () => {
@@ -810,11 +950,37 @@ export function MicroTasksWidget({
 
   const handleToggleDone = async (task: MicroTaskRecord) => {
     const willBeDone = !task.is_done;
+
+    // E2E mode: no supabase, so reorder the local seed directly. Mirrors
+    // the production semantics (complete → float to top of section via
+    // reorderTasksByCompletion) so the Bug F scroll-jump e2e test
+    // exercises the same UI behaviour.
+    if (e2eMode) {
+      if (willBeDone) pinScrollDuringCompletion(task.id);
+      setE2eTasks((prev) => {
+        if (!willBeDone) {
+          return prev.map((t) => (t.id === task.id ? { ...t, is_done: false } : t));
+        }
+        const reordered = reorderTasksByCompletion(prev, task.id, true);
+        if (!reordered) {
+          return prev.map((t) => (t.id === task.id ? { ...t, is_done: true } : t));
+        }
+        // Re-assign `order` so buildFlatList (sorts by order) reflects the
+        // new sequence.
+        return reordered.map((t, i) => ({ ...t, order: i + 1 }));
+      });
+      return;
+    }
+
     if (task.timer_state === 'running' && willBeDone) {
       await toggleTimer.mutateAsync({ id: task.id, isRunning: true });
     }
     await updateTask.mutateAsync({ id: task.id, is_done: willBeDone });
     if (!willBeDone) return;
+    // Pin the viewport across the completion reorder so the page doesn't
+    // jump when the completed task floats up off-screen (Bug F). See
+    // pinScrollDuringCompletion + Phase 7.4 in the plan.
+    pinScrollDuringCompletion(task.id);
     if (task.group_id) {
       const gTasks = groupTasksMap.get(task.group_id) ?? [];
       const nextGroupTasks = reorderTasksByCompletion(gTasks, task.id, willBeDone);

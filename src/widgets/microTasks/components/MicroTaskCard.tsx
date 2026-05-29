@@ -232,7 +232,15 @@ export function MicroTaskCard({
     >
       <button
         type="button"
-        onClick={onToggleDone}
+        // Blur the button on click BEFORE the (async) completion reorder
+        // runs. Otherwise the button keeps focus, the task row reorders
+        // up into the done-section, and the browser auto-scrolls the page
+        // to keep the focused element visible — a jarring jump when the
+        // task moves off-screen. See Phase 7.3 in the plan.
+        onClick={(e) => {
+          e.currentTarget.blur();
+          onToggleDone();
+        }}
         className={clsx(
           'flex h-5 w-5 items-center justify-center rounded-full border text-[0.65rem]',
           task.is_done

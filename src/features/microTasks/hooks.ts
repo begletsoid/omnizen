@@ -87,8 +87,60 @@ const DATA_REFETCH_INTERVAL_MS = 10_000;
  *     click that landed during classification — that was the regression
  *     fixed in Phase 6.
  */
-const pendingTimerStarts = new Set<string>();
+/**
+ * Map from optimistic temp-id → `Date.now()` of the moment the user
+ * pressed ▶ on the temp-row. Used to backfill `elapsed_seconds` when
+ * the server eventually starts the timer, so the loading-delay seconds
+ * the user already "saw ticking" aren't lost. See the migration
+ * `20260514000000_timer_started_offset.sql` for the server side.
+ */
+const pendingTimerStarts = new Map<string, number>();
 const optimisticIdByPayload = new WeakMap<object, string>();
+
+/**
+ * Optimistic `order` value computed in `useCreateMicroTask.onMutate` and
+ * read back inside `mutationFn` as the server INSERT order.
+ *
+ * Why this exists: the previous implementation called
+ * `fetchNextMicroTaskOrder` from inside `mutationFn`, which is a plain
+ * `SELECT max(order) + 1` — NOT atomic across concurrent calls. Two
+ * back-to-back creates both saw the same server max (because the first
+ * INSERT was still parked on the LLM-classify await) and INSERTed with
+ * the same order, producing duplicates that `getMicroTasks`'s single-
+ * column `.order('order')` sort returned in undefined relative order.
+ * Result: tasks visually swapped places 2–3 times during the loading
+ * window.
+ *
+ * `onMutate` computes the order from the LOCAL cache, which already
+ * contains any earlier in-flight temp-rows (since their onMutates ran
+ * sync and added them). So task 1 gets 11, task 2 gets 12, etc. — JS is
+ * single-threaded, no race within one tab. We stash it here so
+ * `mutationFn` can use the same value and skip the racy server fetch.
+ *
+ * Multi-device race (two devices INSERTing into the same widget at the
+ * same time) is NOT closed by this — that needs server-side atomic
+ * order assignment. See Phase 7.2 open questions in the plan.
+ */
+const optimisticOrderByPayload = new WeakMap<object, number>();
+
+/**
+ * Map from optimistic temp-id → the optimistic MicroTaskRecord we pushed
+ * into the cache from `useCreateMicroTask.onMutate`. Lives at module
+ * scope so `useMicroTasks.queryFn` can re-add still-pending temps to
+ * its server result, regardless of who triggered the refetch.
+ *
+ * Without this, a refetch (from this mutation's own onSuccess, from
+ * Realtime subscription, from any sibling mutation's invalidate, or
+ * from the 10-second polling tick) replaces the cache wholesale with
+ * server data and wipes any temp-row whose mutation is still in flight.
+ * That was the "blink" of the second task in the create-two-tasks-back-
+ * to-back scenario (see Phase 7 in the plan).
+ *
+ * Entries are added in `useCreateMicroTask.onMutate` and removed in
+ * `useCreateMicroTask.onSettled` (which fires on both success and
+ * error, so we never leak).
+ */
+const inFlightOptimisticTasks = new Map<string, MicroTaskRecord>();
 
 /**
  * Subscribe to Supabase Realtime for micro_tasks owned by this user.
@@ -156,7 +208,7 @@ export function useMicroTasks(widgetId: string | null) {
       };
       type RawTask = Omit<MicroTaskRecord, 'categories'> & { categories?: RawCategoryLink[] };
 
-      return (data ?? []).map((task) => {
+      const serverTasks = (data ?? []).map((task) => {
         const raw = task as RawTask;
         return {
           ...raw,
@@ -185,6 +237,25 @@ export function useMicroTasks(widgetId: string | null) {
             })) ?? [],
         };
       }) as MicroTaskRecord[];
+
+      // Merge in any optimistic temp-rows whose mutations are still in
+      // flight at the moment this refetch resolved. Without this step,
+      // a refetch triggered by ANY source (this mutation's own
+      // invalidate, Realtime, a sibling mutation, polling) wipes the
+      // user's temp-row before the create-mutation has a chance to
+      // replace it with the server row. See Phase 7 in the plan.
+      // temp-ids carry the `temp-` prefix, so they can never collide
+      // with server UUIDs — no dedup needed.
+      if (inFlightOptimisticTasks.size > 0) {
+        const stillPendingTemps: MicroTaskRecord[] = [];
+        for (const task of inFlightOptimisticTasks.values()) {
+          if (task.widget_id === widgetId) stillPendingTemps.push(task);
+        }
+        if (stillPendingTemps.length > 0) {
+          return [...serverTasks, ...stillPendingTemps];
+        }
+      }
+      return serverTasks;
     },
     enabled,
   });
@@ -324,7 +395,14 @@ export function useCreateMicroTask(widgetId: string | null) {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
       const { category_ids_override, ...insertData } = payload;
-      const order = await fetchNextMicroTaskOrder(widgetId);
+      // Prefer the order computed in onMutate against the local cache
+      // (which knows about other in-flight temps). Fall back to the
+      // racy server fetch only if onMutate didn't run for some reason
+      // (defensive — in practice useMutation always runs onMutate
+      // before mutationFn).
+      const knownOrder = optimisticOrderByPayload.get(payload);
+      const order = knownOrder ?? (await fetchNextMicroTaskOrder(widgetId));
+      if (knownOrder !== undefined) optimisticOrderByPayload.delete(payload);
 
       // Category resolution priority (resolved BEFORE the INSERT so the
       // LLM-classify wait gives the user a window to press ▶ on the
@@ -348,8 +426,16 @@ export function useCreateMicroTask(widgetId: string | null) {
       // every click that happened during classification. See the comment
       // on `pendingTimerStarts` at module top for the race this closes.
       const tempId = optimisticIdByPayload.get(payload);
-      const wantsStartTimer = tempId ? pendingTimerStarts.has(tempId) : false;
+      const clickTime = tempId ? pendingTimerStarts.get(tempId) : undefined;
+      const wantsStartTimer = clickTime !== undefined;
       if (tempId) pendingTimerStarts.delete(tempId);
+      // How many seconds the user "already saw" ticking on the optimistic
+      // temp-row before we got around to telling the server. The RPC bumps
+      // `elapsed_seconds` by this amount so the displayed timer doesn't
+      // jump back to 0 when the server row replaces the temp-row.
+      const startedOffsetSeconds = wantsStartTimer
+        ? Math.max(0, Math.floor((Date.now() - clickTime!) / 1000))
+        : 0;
 
       const { data, error } = await createMicroTask({
         widget_id: widgetId,
@@ -357,6 +443,7 @@ export function useCreateMicroTask(widgetId: string | null) {
         order,
         ...insertData,
         start_timer: wantsStartTimer,
+        started_offset_seconds: startedOffsetSeconds,
       });
       if (error) throw error;
       if (!data) throw new Error('createMicroTask returned no row');
@@ -388,6 +475,11 @@ export function useCreateMicroTask(widgetId: string | null) {
       // onMutate but doesn't receive context) via a WeakMap keyed on the
       // mutate payload — same object reference both callbacks see.
       optimisticIdByPayload.set(variables, optimisticId);
+      // Same trick for the order: stash the value computed against the
+      // local cache (which already includes earlier in-flight temps) so
+      // mutationFn can use it instead of doing a racy server max-query.
+      // See comment on optimisticOrderByPayload at module top.
+      optimisticOrderByPayload.set(variables, nextOrder);
       const optimisticTask: MicroTaskRecord = {
         id: optimisticId,
         widget_id: widgetId,
@@ -406,6 +498,11 @@ export function useCreateMicroTask(widgetId: string | null) {
       queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
         old ? [...old, optimisticTask] : [optimisticTask],
       );
+      // Register this temp-row so `useMicroTasks.queryFn` re-adds it if a
+      // refetch happens (from this or any other source) before our own
+      // onSuccess gets a chance to replace it with the server row. See
+      // the inFlightOptimisticTasks comment at module top.
+      inFlightOptimisticTasks.set(optimisticId, optimisticTask);
       return { previous, optimisticId };
     },
     onError: (_err, _vars, context) => {
@@ -425,19 +522,30 @@ export function useCreateMicroTask(widgetId: string | null) {
       // the timer server-side BEFORE invalidating, so the refetch sees
       // the running state and doesn't snap the UI back to 'never'.
       const tempId = context?.optimisticId;
-      const lateClick = !!tempId && pendingTimerStarts.has(tempId);
+      const lateClickTime = tempId ? pendingTimerStarts.get(tempId) : undefined;
+      const lateClick = lateClickTime !== undefined;
       if (tempId) pendingTimerStarts.delete(tempId);
 
+      let lateClickElapsed = 0;
       if (lateClick) {
+        // Same offset-compensation as the early path: pass the seconds the
+        // user already saw ticking on the optimistic temp-row so the
+        // server-side elapsed_seconds doesn't snap back to 0.
+        lateClickElapsed = Math.max(0, Math.floor((Date.now() - lateClickTime!) / 1000));
         try {
-          await startMicroTaskTimer(data.id);
+          await startMicroTaskTimer(data.id, lateClickElapsed);
         } catch (err) {
           console.warn('late-click startMicroTaskTimer failed', err);
         }
       }
 
       const replacement: MicroTaskRecord = lateClick
-        ? { ...data, timer_state: 'running', last_started_at: new Date().toISOString() }
+        ? {
+            ...data,
+            timer_state: 'running',
+            last_started_at: new Date().toISOString(),
+            elapsed_seconds: data.elapsed_seconds + lateClickElapsed,
+          }
         : data;
 
       queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) => {
@@ -450,6 +558,14 @@ export function useCreateMicroTask(widgetId: string | null) {
       // aggregated elapsed_seconds and "linked tasks count" right away —
       // otherwise the user has to wait for the 10s `useGoals` polling tick.
       queryClient.invalidateQueries({ queryKey: ['goals'] });
+    },
+    onSettled: (_data, _err, _vars, context) => {
+      // Cleanup the in-flight temp-row registration on BOTH success and
+      // error. We don't gate on widgetId here because the optimisticId is
+      // also stashed without a widget reference — the delete is a no-op
+      // if the entry was never set.
+      const tempId = context?.optimisticId;
+      if (tempId) inFlightOptimisticTasks.delete(tempId);
     },
   });
 }
@@ -714,7 +830,7 @@ export function useToggleMicroTaskTimer(widgetId: string | null) {
       // the user sees no delay.
       if (id.startsWith('temp-')) {
         if (isRunning) pendingTimerStarts.delete(id);
-        else pendingTimerStarts.add(id);
+        else pendingTimerStarts.set(id, Date.now());
         return null;
       }
       if (isRunning) return pauseMicroTaskTimer(id);
