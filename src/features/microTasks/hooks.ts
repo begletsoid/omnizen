@@ -143,6 +143,18 @@ const optimisticOrderByPayload = new WeakMap<object, number>();
 const inFlightOptimisticTasks = new Map<string, MicroTaskRecord>();
 
 /**
+ * Optimistic temp-ids whose in-flight create the user cancelled by
+ * pressing ✕ on the still-loading optimistic row. `useDeleteMicroTask`
+ * adds the id here (instead of hitting the server, which has no such row
+ * yet); `useCreateMicroTask` checks it both before the INSERT (abort
+ * early, the common "cancel during LLM-classify" case) and in onSuccess
+ * (undo the server row if the cancel landed in the brief post-INSERT
+ * window). Without this the ✕ was a no-op — the create completed anyway
+ * and the inFlightOptimisticTasks merge even made the row blink back.
+ */
+const cancelledOptimisticIds = new Set<string>();
+
+/**
  * Subscribe to Supabase Realtime for micro_tasks owned by this user.
  *
  * Mount this once at the dashboard root (not inside individual widgets)
@@ -246,10 +258,16 @@ export function useMicroTasks(widgetId: string | null) {
       // replace it with the server row. See Phase 7 in the plan.
       // temp-ids carry the `temp-` prefix, so they can never collide
       // with server UUIDs — no dedup needed.
+      //
+      // Skip temps the user has cancelled (✕ during loading): otherwise a
+      // refetch landing in the gap before the create mutation tears down
+      // would re-add the just-deleted row for a frame (the Bug G blink).
       if (inFlightOptimisticTasks.size > 0) {
         const stillPendingTemps: MicroTaskRecord[] = [];
         for (const task of inFlightOptimisticTasks.values()) {
-          if (task.widget_id === widgetId) stillPendingTemps.push(task);
+          if (task.widget_id === widgetId && !cancelledOptimisticIds.has(task.id)) {
+            stillPendingTemps.push(task);
+          }
         }
         if (stillPendingTemps.length > 0) {
           return [...serverTasks, ...stillPendingTemps];
@@ -426,6 +444,23 @@ export function useCreateMicroTask(widgetId: string | null) {
       // every click that happened during classification. See the comment
       // on `pendingTimerStarts` at module top for the race this closes.
       const tempId = optimisticIdByPayload.get(payload);
+
+      // Cancellation check: if the user pressed ✕ on the temp-row during
+      // the LLM-classify window above, abort before we ever INSERT.
+      // CRITICAL: return null, do NOT throw. The QueryClient sets
+      // `mutations: { retry: 1 }` (AppProviders), so a thrown error would
+      // be RETRIED — and the retry's second pass runs after this block has
+      // already cleared the cancel flag, so it would sail through and
+      // create the task on the server anyway (the actual Bug G). A normal
+      // (non-throwing) return is a success → no retry. onSuccess sees the
+      // null and just confirms the temp is gone from the cache.
+      if (tempId && cancelledOptimisticIds.has(tempId)) {
+        cancelledOptimisticIds.delete(tempId);
+        inFlightOptimisticTasks.delete(tempId);
+        pendingTimerStarts.delete(tempId);
+        return null;
+      }
+
       const clickTime = tempId ? pendingTimerStarts.get(tempId) : undefined;
       const wantsStartTimer = clickTime !== undefined;
       if (tempId) pendingTimerStarts.delete(tempId);
@@ -512,6 +547,42 @@ export function useCreateMicroTask(widgetId: string | null) {
     onSuccess: async (data, _vars, context) => {
       if (!widgetId) return;
 
+      // Pre-INSERT cancellation: mutationFn returned null (the user pressed
+      // ✕ during the loading window). No throw → no retry. The delete
+      // handler already removed the temp from the cache; just make sure
+      // it's gone and stop — nothing was created on the server.
+      if (!data) {
+        const tempId = context?.optimisticId;
+        if (tempId) {
+          queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+            old?.filter((task) => task.id !== tempId) ?? [],
+          );
+        }
+        return;
+      }
+
+      // Cancellation that landed AFTER the INSERT (the narrow window
+      // between createMicroTask resolving and this callback). The early
+      // check in mutationFn missed it, so the server row exists — undo it
+      // and drop both the temp and the real row from the cache.
+      const cancelId = context?.optimisticId;
+      if (cancelId && cancelledOptimisticIds.has(cancelId)) {
+        cancelledOptimisticIds.delete(cancelId);
+        inFlightOptimisticTasks.delete(cancelId);
+        // Await the undo so the server row is actually gone before we
+        // invalidate — otherwise a hard reload could still load it.
+        try {
+          await deleteMicroTask(data.id);
+        } catch (err) {
+          console.warn('failed to undo cancelled micro-task create', err);
+        }
+        queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+          old?.filter((task) => task.id !== cancelId && task.id !== data.id) ?? [],
+        );
+        queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+        return;
+      }
+
       // Late-click safety net: even with the LLM-before-check reorder, the
       // user can press ▶ on the temp-row AFTER our `pendingTimerStarts`
       // read at the top of mutationFn but BEFORE we get here (the window
@@ -565,7 +636,10 @@ export function useCreateMicroTask(widgetId: string | null) {
       // also stashed without a widget reference — the delete is a no-op
       // if the entry was never set.
       const tempId = context?.optimisticId;
-      if (tempId) inFlightOptimisticTasks.delete(tempId);
+      if (tempId) {
+        inFlightOptimisticTasks.delete(tempId);
+        cancelledOptimisticIds.delete(tempId);
+      }
     },
   });
 }
@@ -620,6 +694,16 @@ export function useDeleteMicroTask(widgetId: string | null) {
   return useMutation({
     mutationFn: async (id: string) => {
       if (!user) throw new Error('User not authenticated');
+      // Deleting a still-loading optimistic row (✕ pressed during create):
+      // there's no server row yet, so don't call the server. Instead mark
+      // the in-flight create as cancelled — useCreateMicroTask aborts the
+      // INSERT (or undoes it if it already happened). See
+      // cancelledOptimisticIds at module top.
+      if (id.startsWith('temp-')) {
+        cancelledOptimisticIds.add(id);
+        inFlightOptimisticTasks.delete(id);
+        return null;
+      }
       const tasks = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
       const task = tasks?.find((t) => t.id === id);
       if (task?.timer_state === 'running') {
@@ -628,6 +712,17 @@ export function useDeleteMicroTask(widgetId: string | null) {
       return deleteMicroTask(id);
     },
     onMutate: async (id) => {
+      // Mark the cancel SYNCHRONOUSLY — before any await — so a concurrent
+      // create sees it no matter how long `cancelQueries` below takes (it
+      // can block on an in-flight refetch that lacks an AbortSignal). The
+      // previous version set this flag only in mutationFn, AFTER the await,
+      // which let the create's INSERT slip through if cancelQueries stalled
+      // — the task then persisted on the server (Bug G). Also drop it from
+      // the in-flight merge set right away so no refetch re-adds it.
+      if (id.startsWith('temp-')) {
+        cancelledOptimisticIds.add(id);
+        inFlightOptimisticTasks.delete(id);
+      }
       if (!widgetId) return;
       await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
       const previous = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
@@ -636,12 +731,19 @@ export function useDeleteMicroTask(widgetId: string | null) {
       );
       return { previous };
     },
-    onError: (_err, _id, context) => {
+    onError: (_err, id, context) => {
       if (!widgetId || !context?.previous) return;
+      // Don't resurrect a cancelled temp-row from the `previous` snapshot.
+      if (typeof id === 'string' && id.startsWith('temp-')) return;
       queryClient.setQueryData(['microTasks', widgetId], context.previous);
     },
-    onSettled: () => {
+    onSettled: (_data, _err, id) => {
       if (!widgetId) return;
+      // For a cancelled temp-row, skip the refetch: the server has nothing
+      // to return for it, and the create's own onSettled/onSuccess does the
+      // final cleanup. A refetch here could briefly re-show the row via the
+      // inFlightOptimisticTasks merge if the create hasn't cleared yet.
+      if (typeof id === 'string' && id.startsWith('temp-')) return;
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
       // Deleting a task drops its elapsed_seconds from any goal aggregation.
       queryClient.invalidateQueries({ queryKey: ['goals'] });

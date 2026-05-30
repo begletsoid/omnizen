@@ -538,6 +538,9 @@ export function MicroTasksWidget({
         group_id: task.group_id ?? null,
         category_ids_override: categoryIds,
       });
+      // `created` is null only when the create was cancelled mid-flight
+      // (✕ on the temp-row) — nothing to start then.
+      if (!created) return;
       // Auto-start the duplicate's timer. start_micro_task_timer pauses any
       // other running task in the widget atomically, so the previously active
       // task gets paused without a separate call.

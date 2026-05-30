@@ -126,6 +126,33 @@ export function HabitsWidget({
     };
   }, []);
 
+  // Polling backstop for the day rollover. The setTimeout + focus +
+  // visibilitychange triggers above all FAIL in one common scenario:
+  // the tab stays open AND visible while the computer sleeps across the
+  // 4 AM boundary (e.g. laptop asleep overnight). On wake no focus or
+  // visibilitychange fires (visibility never changed), and the overdue
+  // setTimeout is unreliable. So the "burning" highlight stayed off until
+  // a manual reload. This interval recomputes the habit-day boundary every
+  // 30s and bumps `dayMarker` when it changes — after wake it self-heals
+  // within one tick, no reload needed.
+  useEffect(() => {
+    const computeStart = () => {
+      const b = new Date();
+      b.setHours(4, 0, 0, 0);
+      if (Date.now() < b.getTime()) b.setDate(b.getDate() - 1);
+      return b.getTime();
+    };
+    let last = computeStart();
+    const id = setInterval(() => {
+      const next = computeStart();
+      if (next !== last) {
+        last = next;
+        setDayMarker((n) => n + 1);
+      }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   const getHabitSnapshot = useCallback(
     (habitId: string) => {
       if (!widgetId) return null;
