@@ -138,10 +138,21 @@ describe('HabitsWidget scroll behavior', () => {
 
     try {
       const { getByTestId } = renderWithClient(
-        <HabitsWidget widgetId="w1" initialScrollTop={0} onScrollPersist={onScrollPersist} />,
+        <HabitsWidget widgetId="w1" initialScrollTop={40} onScrollPersist={onScrollPersist} />,
       );
       const scrollable = getByTestId('habits-scrollable');
       mockScrollableMetrics(scrollable, { scrollHeight: 600, clientHeight: 200 });
+
+      // Let the scroll-restore effect finish BEFORE simulating the user
+      // scroll. The restore rAF (shimmed to a real timer) races the act()
+      // below: on Linux CI its timer matured mid-act and snapped scrollTop
+      // back, so the debounce callback read the restored value, tripped the
+      // lastPersisted dedupe guard and never called onScrollPersist (the
+      // "Number of calls: 0" CI-only failure). Waiting for the restore to
+      // land (scrollTop === 40) closes that window deterministically.
+      await waitFor(() => {
+        expect(scrollable.scrollTop).toBe(40);
+      });
 
       await act(async () => {
         scrollable.scrollTop = 250;
