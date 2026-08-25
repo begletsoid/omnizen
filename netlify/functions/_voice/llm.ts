@@ -19,7 +19,11 @@ import { INTENT_REGISTRY } from './intents';
 import { MAX_ACTIONS_PER_COMMAND, type LlmAction, type LlmActionPlan } from './types';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile was decommissioned by Groq on 2026-08-16 (404
+// model_not_found afterwards) — openai/gpt-oss-120b is Groq's recommended
+// replacement. Env-overridable so the NEXT decommission is a Netlify env
+// edit (GROQ_LLM_MODEL), not a redeploy.
+const GROQ_MODEL = process.env.GROQ_LLM_MODEL ?? 'openai/gpt-oss-120b';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_MODEL = 'claude-3-5-haiku-latest';
@@ -313,6 +317,10 @@ async function callGroq(
       model: GROQ_MODEL,
       response_format: { type: 'json_object' },
       temperature: 0.1,
+      // gpt-oss are reasoning models; default (medium) effort adds ~1s of
+      // hidden thinking. Our classify calls are latency-sensitive (user is
+      // staring at the dashboard), and the task is simple — low is plenty.
+      ...(GROQ_MODEL.startsWith('openai/gpt-oss') ? { reasoning_effort: 'low' } : {}),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },

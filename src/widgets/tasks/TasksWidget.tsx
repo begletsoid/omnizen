@@ -25,6 +25,9 @@ import { useCrossWidgetDrag } from './CrossWidgetDragContext';
 
 const DRAG_ACTIVATION_DISTANCE = 6;
 const EMPTY_CATEGORIES: TaskCategory[] = [];
+// Re-check recurring-goal crons this often while the dashboard stays open so a
+// goal that comes due materialises without a manual page reload.
+const CRON_POLL_MS = 60_000;
 
 type DropTarget = { id: string; position: 'before' | 'after' };
 type DragState = { draggedId: string; dropTarget: DropTarget | null };
@@ -50,7 +53,6 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
 
   const { data: recurringGoals = [] } = useRecurringGoals(widgetId);
   const updateRecurringGoal = useUpdateRecurringGoal(widgetId);
-  const cronCheckedRef = useRef(false);
 
   // Need the user's micro-tasks widget id to mirror the cron-fired goal as a
   // micro-task. Listen to the same dashboard bootstrap that DashboardShell
@@ -61,43 +63,6 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
     () => bootstrap?.widgets.find((w) => w.type === 'tasks')?.id ?? null,
     [bootstrap?.widgets],
   );
-
-  useEffect(() => {
-    if (cronCheckedRef.current || !widgetId || recurringGoals.length === 0) return;
-    cronCheckedRef.current = true;
-
-    const pending = findPendingTriggers(recurringGoals);
-    if (pending.length === 0) return;
-
-    void (async () => {
-      for (const { recurringGoal, triggerTime } of pending) {
-        const newGoal = await createGoal.mutateAsync({
-          title: recurringGoal.title,
-          value: recurringGoal.value,
-          expected_hours: recurringGoal.expected_hours,
-          is_recurring: true,
-        });
-        await updateRecurringGoal.mutateAsync({
-          id: recurringGoal.id,
-          last_triggered_at: triggerTime.toISOString(),
-        });
-        // Mirror the new goal into micro-tasks. The MicroTasksWidget already
-        // listens for `cross-widget-drop` (used by manual goal→tasks drags);
-        // dispatching the same event here gives the cron-fired goal the
-        // exact behaviour the user gets when they manually drag.
-        if (microTasksWidgetId && newGoal?.id) {
-          window.dispatchEvent(
-            new CustomEvent('cross-widget-drop', {
-              detail: {
-                targetWidgetId: microTasksWidgetId,
-                goal: { id: newGoal.id, title: newGoal.title, categories: [] },
-              },
-            }),
-          );
-        }
-      }
-    })();
-  }, [widgetId, recurringGoals, createGoal, updateRecurringGoal, microTasksWidgetId]);
 
   const [editingGoal, setEditingGoal] = useState<{ id: string; value: string } | null>(null);
   const [newTitle, setNewTitle] = useState('');
@@ -116,6 +81,7 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
   const reorderGoalsMutate = reorderGoalsMutation.mutate;
   const attachCategoryAsync = attachCategory.mutateAsync;
   const detachCategoryAsync = detachCategory.mutateAsync;
+  const updateRecurringGoalAsync = updateRecurringGoal.mutateAsync;
 
   const handleAddGoal = useCallback(async () => {
     const title = newTitle.trim();
@@ -127,6 +93,74 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
   // Latest goals snapshot readable from inside stable handlers.
   const goalsRef = useRef(goals);
   useEffect(() => { goalsRef.current = goals; }, [goals]);
+
+  // Refs so the cron interval reads the freshest data without tearing itself
+  // down and re-arming whenever these change.
+  const recurringGoalsRef = useRef(recurringGoals);
+  useEffect(() => { recurringGoalsRef.current = recurringGoals; }, [recurringGoals]);
+  const microTasksWidgetIdRef = useRef(microTasksWidgetId);
+  useEffect(() => { microTasksWidgetIdRef.current = microTasksWidgetId; }, [microTasksWidgetId]);
+
+  // Recurring-goal cron. Runs on mount AND on an interval, so a goal that comes
+  // due materialises while the dashboard stays open — no manual reload.
+  // `findPendingTriggers` returns at most one (most-recent) occurrence per
+  // template and baselines a never-triggered template to *today*, so a fresh
+  // client never back-fills months of history (which flooded the board with
+  // duplicate goals + micro-tasks).
+  const cronRunningRef = useRef(false);
+  useEffect(() => {
+    if (!widgetId) return;
+
+    const runCronCheck = async () => {
+      if (cronRunningRef.current) return; // never overlap async runs
+      const rgs = recurringGoalsRef.current;
+      if (!rgs || rgs.length === 0) return;
+      const pending = findPendingTriggers(rgs);
+      if (pending.length === 0) return;
+
+      cronRunningRef.current = true;
+      try {
+        for (const { recurringGoal } of pending) {
+          // Don't create a second copy if an active (not archived, not done)
+          // goal with this title is already on the board — guards against a
+          // second tab/device firing the same occurrence.
+          const dup = goalsRef.current.some(
+            (g) => g.title === recurringGoal.title && !g.archived_at && !g.is_done,
+          );
+          if (!dup) {
+            const newGoal = await createGoalAsync({
+              title: recurringGoal.title,
+              value: recurringGoal.value,
+              expected_hours: recurringGoal.expected_hours,
+              is_recurring: true,
+            });
+            if (microTasksWidgetIdRef.current && newGoal?.id) {
+              window.dispatchEvent(
+                new CustomEvent('cross-widget-drop', {
+                  detail: {
+                    targetWidgetId: microTasksWidgetIdRef.current,
+                    goal: { id: newGoal.id, title: newGoal.title, categories: [] },
+                  },
+                }),
+              );
+            }
+          }
+          // Advance the window to now regardless (fired or skipped-as-dup), so
+          // this occurrence is never reconsidered.
+          await updateRecurringGoalAsync({
+            id: recurringGoal.id,
+            last_triggered_at: new Date().toISOString(),
+          });
+        }
+      } finally {
+        cronRunningRef.current = false;
+      }
+    };
+
+    void runCronCheck();
+    const timer = window.setInterval(() => void runCronCheck(), CRON_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [widgetId, createGoalAsync, updateRecurringGoalAsync]);
 
   const handleToggleDone = useCallback((goal: GoalRecord) => {
     const newDone = !goal.is_done;

@@ -69,3 +69,70 @@ describe('findPendingTriggers', () => {
     expect(pending.length).toBe(0);
   });
 });
+
+describe('findPendingTriggers — anti-flood semantics', () => {
+  const monthly = '0 0 1 * *'; // 1st of every month, local midnight
+
+  it('never back-fills a never-triggered template from its creation date', () => {
+    // Seeded months ago, never fired. Old behaviour returned one trigger per
+    // month since creation (the duplicate flood). New behaviour baselines to
+    // today, so a mid-month load finds nothing due.
+    const now = new Date('2026-07-03T12:00:00Z');
+    const recurring = rg({
+      cron_expression: monthly,
+      created_at: '2026-01-15T00:00:00Z',
+      last_triggered_at: null,
+    });
+    const pending = findPendingTriggers([recurring], now);
+    expect(pending.length).toBe(0);
+  });
+
+  it('collapses many missed occurrences to a single most-recent trigger', () => {
+    // Half a year of 1st-of-month occurrences sit in the window; emit exactly
+    // one (the latest), never six.
+    const now = new Date('2026-07-03T00:00:00Z');
+    const recurring = rg({
+      cron_expression: monthly,
+      last_triggered_at: '2026-01-15T00:00:00Z',
+    });
+    const pending = findPendingTriggers([recurring], now);
+    expect(pending.length).toBe(1);
+    expect(pending[0].triggerTime.getDate()).toBe(1);
+    expect(pending[0].triggerTime.getMonth()).toBe(6); // July (0-based)
+  });
+
+  it('skips a single occurrence that is already stale (beyond the grace window)', () => {
+    const now = new Date('2026-06-10T00:00:00Z');
+    const recurring = rg({
+      cron_expression: monthly,
+      last_triggered_at: '2026-05-20T00:00:00Z', // window holds only Jun 1, 9 days old
+    });
+    const pending = findPendingTriggers([recurring], now);
+    expect(pending.length).toBe(0);
+  });
+
+  it('fires the freshly-due occurrence when resuming within the grace window', () => {
+    const now = new Date('2026-07-02T12:00:00Z');
+    const recurring = rg({
+      cron_expression: monthly,
+      last_triggered_at: '2026-06-30T00:00:00Z',
+    });
+    const pending = findPendingTriggers([recurring], now);
+    expect(pending.length).toBe(1);
+    expect(pending[0].triggerTime.getDate()).toBe(1);
+  });
+
+  it('baselines a never-triggered template to today (fires an occurrence due earlier today)', () => {
+    const now = new Date('2026-07-03T12:00:00Z');
+    // Derive the cron from now's LOCAL date so "today" holds in any timezone.
+    const cron = `0 0 ${now.getDate()} ${now.getMonth() + 1} *`;
+    const recurring = rg({
+      cron_expression: cron,
+      created_at: '2026-01-01T00:00:00Z',
+      last_triggered_at: null,
+    });
+    const pending = findPendingTriggers([recurring], now);
+    expect(pending.length).toBe(1);
+    expect(pending[0].triggerTime.getDate()).toBe(now.getDate());
+  });
+});
