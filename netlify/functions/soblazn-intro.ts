@@ -3,19 +3,18 @@ import { createClient } from "@supabase/supabase-js";
 /**
  * soblazn → «начни с ней» с телефона.
  *
- * Быстрая команда на iPhone шлёт сюда POST с одной строкой:
- *     { "token": "<токен>", "line": "anna_k Аня 24 pure 80" }
- * (или text/plain со строкой и заголовком Authorization: Bearer <токен>).
+ * Быстрая команда на iPhone шлёт сюда POST с одной строкой в JSON:
+ *     { "line": "anna_k Аня 24 pure 80" }
+ * и заголовком Authorization: Bearer <токен> — тем же, что у остальных
+ * быстрых команд дашборда (profiles.voice_webhook_token или
+ * profiles.sleep_webhook_token, оба принимаются). Токен можно передать и
+ * полем "token" в теле. Отдельный SOBLAZN_INTRO_SECRET в env — по желанию.
  * Строка строго: логин имя возраст сайт оценка, пропуск — «-».
  *
  * Функция кладёт строку в таблицу soblazn_intros. Бот soblazn на компе Макса
  * подписан на неё через Supabase Realtime: забирает строку, разбирает, пишет ей
  * первым через Telegram Desktop и отмечает результат в той же строке. Комп из
  * интернета не виден, поэтому таблица, а не прямой запрос на ПК.
- *
- * Токен — тот же, что у быстрой команды дашборда (profiles.sleep_webhook_token),
- * либо SOBLAZN_INTRO_SECRET из env, если задан. Supabase берётся из тех же env,
- * что и у остальных функций (SUPABASE_URL / VITE_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY).
  *
  * Ответ — всегда plain text (быстрая команда показывает его уведомлением):
  * разбор строки бот делает за секунду, поэтому ошибка формата придёт сразу;
@@ -37,15 +36,19 @@ export default async function handler(req: Request): Promise<Response> {
     body = { line: raw };
   }
   const fromHeader = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  const token = (typeof body.token === "string" && body.token.trim()) || fromHeader;
-  if (!token) return text("нет токена", 401);
+  const token = fromHeader || (typeof body.token === "string" ? body.token.trim() : "");
+  if (!token) return text("нет токена: нужен заголовок Authorization: Bearer <токен дашборда>", 401);
 
   const supabase = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
   const secret = process.env.SOBLAZN_INTRO_SECRET;
   let authorized = !!secret && token === secret;
   if (!authorized) {
-    const { data: profile, error } = await supabase.from("profiles").select("id").eq("sleep_webhook_token", token).maybeSingle();
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("id")
+      .or(`voice_webhook_token.eq.${token},sleep_webhook_token.eq.${token}`)
+      .maybeSingle();
     if (error) return text(`supabase: ${error.message}`, 500);
     authorized = !!profile;
   }
