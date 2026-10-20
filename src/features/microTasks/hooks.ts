@@ -142,6 +142,34 @@ const optimisticOrderByPayload = new WeakMap<object, number>();
  */
 const inFlightOptimisticTasks = new Map<string, MicroTaskRecord>();
 
+// Hide an inserted row until its temp-row has finished category attachment
+// and placement reconciliation. Realtime can refetch during either await.
+const inFlightServerIds = new Map<string, string>();
+
+type TaskPlacement = Omit<MicroTaskGroupTaskUpdatePayload, 'id'>;
+
+function taskPlacement(task: Pick<MicroTaskRecord, 'order' | 'group_id' | 'group_order'>): TaskPlacement {
+  return { order: task.order, group_id: task.group_id ?? null, group_order: task.group_order ?? null };
+}
+
+function updatePendingTaskPlacements(updates: Array<{ id: string } & Partial<TaskPlacement>>) {
+  const previous: MicroTaskRecord[] = [];
+  for (const update of updates) {
+    const pending = inFlightOptimisticTasks.get(update.id);
+    if (!pending) continue;
+    previous.push(pending);
+    inFlightOptimisticTasks.set(update.id, { ...pending, ...update });
+  }
+  return previous;
+}
+
+function restorePendingTaskPlacements(previous: MicroTaskRecord[]) {
+  for (const task of previous) {
+    const pending = inFlightOptimisticTasks.get(task.id);
+    if (pending) inFlightOptimisticTasks.set(task.id, { ...pending, ...taskPlacement(task) });
+  }
+}
+
 /**
  * Optimistic temp-ids whose in-flight create the user cancelled by
  * pressing ✕ on the still-loading optimistic row. `useDeleteMicroTask`
@@ -220,7 +248,8 @@ export function useMicroTasks(widgetId: string | null) {
       };
       type RawTask = Omit<MicroTaskRecord, 'categories'> & { categories?: RawCategoryLink[] };
 
-      const serverTasks = (data ?? []).map((task) => {
+      const pendingServerIds = new Set(inFlightServerIds.values());
+      const serverTasks = (data ?? []).filter((task) => !pendingServerIds.has(task.id)).map((task) => {
         const raw = task as RawTask;
         return {
           ...raw,
@@ -419,8 +448,7 @@ export function useCreateMicroTask(widgetId: string | null) {
       // (defensive — in practice useMutation always runs onMutate
       // before mutationFn).
       const knownOrder = optimisticOrderByPayload.get(payload);
-      const order = knownOrder ?? (await fetchNextMicroTaskOrder(widgetId));
-      if (knownOrder !== undefined) optimisticOrderByPayload.delete(payload);
+      const initialOrder = knownOrder ?? (await fetchNextMicroTaskOrder(widgetId));
 
       // Category resolution priority (resolved BEFORE the INSERT so the
       // LLM-classify wait gives the user a window to press ▶ on the
@@ -472,16 +500,21 @@ export function useCreateMicroTask(widgetId: string | null) {
         ? Math.max(0, Math.floor((Date.now() - clickTime!) / 1000))
         : 0;
 
+      // Reordering a temp-row updates this registry synchronously. Read it
+      // AFTER classification so INSERT uses the user's latest placement.
+      const pendingTask = tempId ? inFlightOptimisticTasks.get(tempId) : undefined;
+      const placement = taskPlacement(pendingTask ?? { ...insertData, order: initialOrder });
       const { data, error } = await createMicroTask({
         widget_id: widgetId,
         user_id: user.id,
-        order,
         ...insertData,
+        ...placement,
         start_timer: wantsStartTimer,
         started_offset_seconds: startedOffsetSeconds,
       });
       if (error) throw error;
       if (!data) throw new Error('createMicroTask returned no row');
+      if (tempId) inFlightServerIds.set(tempId, data.id);
 
       if (categoriesToAttach.length > 0) {
         await attachCategoriesToTask(data.id, categoriesToAttach, user.id);
@@ -522,6 +555,8 @@ export function useCreateMicroTask(widgetId: string | null) {
         title: variables.title,
         is_done: variables.is_done ?? false,
         order: nextOrder,
+        group_id: variables.group_id ?? null,
+        group_order: variables.group_order ?? null,
         elapsed_seconds: 0,
         timer_state: 'never',
         last_started_at: null,
@@ -561,67 +596,78 @@ export function useCreateMicroTask(widgetId: string | null) {
         return;
       }
 
-      // Cancellation that landed AFTER the INSERT (the narrow window
-      // between createMicroTask resolving and this callback). The early
-      // check in mutationFn missed it, so the server row exists — undo it
-      // and drop both the temp and the real row from the cache.
-      const cancelId = context?.optimisticId;
-      if (cancelId && cancelledOptimisticIds.has(cancelId)) {
-        cancelledOptimisticIds.delete(cancelId);
-        inFlightOptimisticTasks.delete(cancelId);
-        // Await the undo so the server row is actually gone before we
-        // invalidate — otherwise a hard reload could still load it.
-        try {
-          await deleteMicroTask(data.id);
-        } catch (err) {
-          console.warn('failed to undo cancelled micro-task create', err);
-        }
-        queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
-          old?.filter((task) => task.id !== cancelId && task.id !== data.id) ?? [],
-        );
-        queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
-        return;
-      }
-
-      // Late-click safety net: even with the LLM-before-check reorder, the
-      // user can press ▶ on the temp-row AFTER our `pendingTimerStarts`
-      // read at the top of mutationFn but BEFORE we get here (the window
-      // between createMicroTask + attachCategoriesToTask + return — up to
-      // ~700ms). In that case the server task came back as 'never' and the
-      // user's optimistic 'running' cache state would be silently
-      // overwritten by the setQueryData below. Detect that case and start
-      // the timer server-side BEFORE invalidating, so the refetch sees
-      // the running state and doesn't snap the UI back to 'never'.
       const tempId = context?.optimisticId;
-      const lateClickTime = tempId ? pendingTimerStarts.get(tempId) : undefined;
-      const lateClick = lateClickTime !== undefined;
-      if (tempId) pendingTimerStarts.delete(tempId);
+      let replacement = data;
 
-      let lateClickElapsed = 0;
-      if (lateClick) {
-        // Same offset-compensation as the early path: pass the seconds the
-        // user already saw ticking on the optimistic temp-row so the
-        // server-side elapsed_seconds doesn't snap back to 0.
-        lateClickElapsed = Math.max(0, Math.floor((Date.now() - lateClickTime!) / 1000));
-        try {
-          await startMicroTaskTimer(data.id, lateClickElapsed);
-        } catch (err) {
-          console.warn('late-click startMicroTaskTimer failed', err);
+      // The task can also move while INSERT, category attachment, or this
+      // save is in flight. Keep the temp-row visible until the latest
+      // placement is persisted; repeat if another drop happened mid-save.
+      // Cancelling refetches prevents an older response from undoing the
+      // final swap. There is no await between the last comparison and swap.
+      while (tempId) {
+        await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
+        // Cancellation can also arrive during placement/timer persistence.
+        // Undo the INSERT before any refetch can expose its server row.
+        if (cancelledOptimisticIds.has(tempId)) {
+          cancelledOptimisticIds.delete(tempId);
+          inFlightOptimisticTasks.delete(tempId);
+          try {
+            await deleteMicroTask(data.id);
+          } catch (err) {
+            console.warn('failed to undo cancelled micro-task create', err);
+          }
+          queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) =>
+            old?.filter((task) => task.id !== tempId && task.id !== data.id) ?? [],
+          );
+          queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
+          return;
         }
-      }
+        const pending = inFlightOptimisticTasks.get(tempId);
+        if (!pending) break;
+        const placement = taskPlacement(pending);
+        const saved = taskPlacement(replacement);
+        if (placement.order !== saved.order || placement.group_id !== saved.group_id ||
+            placement.group_order !== saved.group_order) {
+          await reorderMicroTaskItems({
+            widgetId,
+            userId: data.user_id,
+            taskUpdates: [{ id: data.id, ...placement }],
+            groupUpdates: [],
+          });
+          replacement = { ...replacement, ...placement };
+          continue;
+        }
 
-      const replacement: MicroTaskRecord = lateClick
-        ? {
-            ...data,
+        // Preserve the existing late-▶ safety net, including clicks during
+        // placement persistence. Recheck placement/cancellation after it.
+        const lateClickTime = pendingTimerStarts.get(tempId);
+        if (lateClickTime !== undefined) {
+          pendingTimerStarts.delete(tempId);
+          const elapsed = Math.max(0, Math.floor((Date.now() - lateClickTime) / 1000));
+          try {
+            await startMicroTaskTimer(data.id, elapsed);
+          } catch (err) {
+            console.warn('late-click startMicroTaskTimer failed', err);
+          }
+          replacement = {
+            ...replacement,
             timer_state: 'running',
             last_started_at: new Date().toISOString(),
-            elapsed_seconds: data.elapsed_seconds + lateClickElapsed,
-          }
-        : data;
+            elapsed_seconds: replacement.elapsed_seconds + elapsed,
+          };
+          continue;
+        }
+        break;
+      }
 
+      // Unregister before invalidating: a refetch must see only the real row.
+      if (tempId) {
+        inFlightOptimisticTasks.delete(tempId);
+        inFlightServerIds.delete(tempId);
+      }
       queryClient.setQueryData<MicroTaskRecord[]>(['microTasks', widgetId], (old) => {
         if (!old) return [replacement];
-        return old.map((task) => (task.id === context?.optimisticId ? replacement : task));
+        return [...old.filter((task) => task.id !== tempId && task.id !== data.id), replacement];
       });
 
       queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
@@ -630,7 +676,7 @@ export function useCreateMicroTask(widgetId: string | null) {
       // otherwise the user has to wait for the 10s `useGoals` polling tick.
       queryClient.invalidateQueries({ queryKey: ['goals'] });
     },
-    onSettled: (_data, _err, _vars, context) => {
+    onSettled: (_data, _err, variables, context) => {
       // Cleanup the in-flight temp-row registration on BOTH success and
       // error. We don't gate on widgetId here because the optimisticId is
       // also stashed without a widget reference — the delete is a no-op
@@ -638,8 +684,12 @@ export function useCreateMicroTask(widgetId: string | null) {
       const tempId = context?.optimisticId;
       if (tempId) {
         inFlightOptimisticTasks.delete(tempId);
+        inFlightServerIds.delete(tempId);
         cancelledOptimisticIds.delete(tempId);
+        pendingTimerStarts.delete(tempId);
       }
+      optimisticOrderByPayload.delete(variables);
+      optimisticIdByPayload.delete(variables);
     },
   });
 }
@@ -829,10 +879,14 @@ export function useReorderMicroTasks(widgetId: string | null) {
     mutationFn: (updates: MicroTaskOrderUpdatePayload[]) => {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
-      return reorderMicroTasks({ widgetId, userId: user.id, updates });
+      const persistedUpdates = updates.filter((update) => !update.id.startsWith('temp-'));
+      if (!persistedUpdates.length) return Promise.resolve();
+      return reorderMicroTasks({ widgetId, userId: user.id, updates: persistedUpdates });
     },
     onMutate: async (updates) => {
       if (!widgetId) return;
+      // Publish before any await: create may be about to INSERT or swap ids.
+      const previousPending = updatePendingTaskPlacements(updates);
       await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
       const previous = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
       const map = new Map(updates.map((u) => [u.id, u.order]));
@@ -841,9 +895,10 @@ export function useReorderMicroTasks(widgetId: string | null) {
           ?.map((task) => (map.has(task.id) ? { ...task, order: map.get(task.id)! } : task))
           .sort((a, b) => a.order - b.order) ?? [],
       );
-      return { previous };
+      return { previous, previousPending };
     },
     onError: (_err, _vars, context) => {
+      if (context) restorePendingTaskPlacements(context.previousPending);
       if (!widgetId || !context?.previous) return;
       queryClient.setQueryData(['microTasks', widgetId], context.previous);
     },
@@ -870,12 +925,15 @@ export function useReorderMicroTaskItems(widgetId: string | null) {
       return reorderMicroTaskItems({
         widgetId,
         userId: user.id,
-        taskUpdates,
+        // Temp rows have no server UUID yet. Their latest placement is
+        // saved by the create lifecycle; sending them aborts the whole RPC.
+        taskUpdates: taskUpdates.filter((update) => !update.id.startsWith('temp-')),
         groupUpdates,
       });
     },
     onMutate: async ({ taskUpdates, groupUpdates }) => {
       if (!widgetId) return;
+      const previousPending = updatePendingTaskPlacements(taskUpdates);
       await queryClient.cancelQueries({ queryKey: ['microTasks', widgetId] });
       await queryClient.cancelQueries({ queryKey: ['microTaskGroups', widgetId] });
       const previousTasks = queryClient.getQueryData<MicroTaskRecord[]>(['microTasks', widgetId]);
@@ -897,10 +955,11 @@ export function useReorderMicroTaskItems(widgetId: string | null) {
       queryClient.setQueryData<MicroTaskGroup[]>(['microTaskGroups', widgetId], (old) =>
         old?.map((group) => (groupMap.has(group.id) ? { ...group, order: groupMap.get(group.id)! } : group)) ?? [],
       );
-      return { previousTasks, previousGroups };
+      return { previousTasks, previousGroups, previousPending };
     },
     onError: (_err, _vars, context) => {
       if (!widgetId || !context) return;
+      restorePendingTaskPlacements(context.previousPending);
       if (context.previousTasks) {
         queryClient.setQueryData(['microTasks', widgetId], context.previousTasks);
       }
