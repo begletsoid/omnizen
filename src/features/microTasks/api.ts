@@ -108,7 +108,7 @@ export async function createMicroTaskGroupTemplate(payload: Pick<MicroTaskGroupT
 
 export async function createMicroTaskGroupTemplateItems(
   templateId: string,
-  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>,
+  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>,
 ) {
   const client = requireSupabase();
   if (!items.length) return { data: [], error: null };
@@ -119,6 +119,7 @@ export async function createMicroTaskGroupTemplateItems(
         template_id: templateId,
         title: item.title,
         category_ids: item.category_ids,
+        goal_id: item.goal_id ?? null,
         order: item.order,
       })),
     )
@@ -127,7 +128,7 @@ export async function createMicroTaskGroupTemplateItems(
 
 export async function replaceMicroTaskGroupTemplateItems(
   templateId: string,
-  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>,
+  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>,
 ) {
   const client = requireSupabase();
   const { error: deleteError } = await client

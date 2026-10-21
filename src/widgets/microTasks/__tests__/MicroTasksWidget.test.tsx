@@ -20,6 +20,20 @@ const archiveTaskMock = { mutateAsync: vi.fn(), isPending: false, variables: und
 const updateCategoryColorMock = createMutationMock();
 const reorderItemsMock = { mutate: vi.fn() };
 const createGroupTemplateMock = { mutateAsync: vi.fn() };
+const createGroupMock = { mutateAsync: vi.fn() };
+const templateApi = vi.hoisted(() => ({ items: vi.fn(), createTask: vi.fn() }));
+
+vi.mock('../../../stores/authStore', () => ({
+  useAuthStore: (select: (state: { user: { id: string } }) => unknown) =>
+    select({ user: { id: 'user-1' } }),
+}));
+
+vi.mock('../../../features/microTasks/api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../features/microTasks/api')>(),
+  listMicroTaskGroupTemplateItems: templateApi.items,
+  createMicroTask: templateApi.createTask,
+  fetchNextMicroTaskOrder: async () => 10,
+}));
 
 
 function createMutationMock() {
@@ -31,7 +45,7 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useMicroTaskGroups: () => mockGroupsState,
   useMicroTaskGroupTemplates: () => mockTemplatesState,
   useCreateMicroTask: () => ({ mutateAsync: vi.fn() }),
-  useCreateMicroTaskGroup: () => ({ mutateAsync: vi.fn() }),
+  useCreateMicroTaskGroup: () => createGroupMock,
   useUpdateMicroTaskGroup: () => ({ mutateAsync: vi.fn() }),
   useDeleteMicroTaskGroup: () => ({ mutateAsync: vi.fn() }),
   useCreateMicroTaskGroupTemplate: () => createGroupTemplateMock,
@@ -109,6 +123,9 @@ describe('MicroTasksWidget', () => {
     updateCategoryColorMock.mutateAsync.mockReset();
     reorderItemsMock.mutate.mockReset();
     createGroupTemplateMock.mutateAsync.mockReset();
+    createGroupMock.mutateAsync.mockReset();
+    templateApi.items.mockReset();
+    templateApi.createTask.mockReset();
   });
 
   it('изменение названия задачи инлайн', async () => {
@@ -221,7 +238,7 @@ describe('MicroTasksWidget', () => {
   it('сохраняет шаблон группы без ошибки при дубле имени', async () => {
     mockGroupsState.data = [buildGroup('group-1', 1)];
     mockTasksState.data = [
-      { ...buildTask('task-0', 1), group_id: 'group-1', group_order: 1 },
+      { ...buildTask('task-0', 1), group_id: 'group-1', group_order: 1, goal_id: 'goal-1' },
     ];
     createGroupTemplateMock.mutateAsync.mockResolvedValue({});
 
@@ -230,8 +247,29 @@ describe('MicroTasksWidget', () => {
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      expect(createGroupTemplateMock.mutateAsync).toHaveBeenCalled();
+      expect(createGroupTemplateMock.mutateAsync).toHaveBeenCalledWith({
+        name: 'Group A',
+        items: [{ title: 'Task 1', category_ids: [], goal_id: 'goal-1', order: 1 }],
+      });
     });
+  });
+
+  it('восстанавливает связь с целью при создании группы из памяти', async () => {
+    mockTemplatesState.data = [{
+      id: 'template-1', user_id: 'user-1', name: 'Saved group', created_at: '', updated_at: '',
+    }];
+    createGroupMock.mutateAsync.mockResolvedValue(buildGroup('new-group', 1));
+    templateApi.items.mockResolvedValue([{
+      id: 'item-1', template_id: 'template-1', title: 'Saved task',
+      category_ids: [], goal_id: 'original-goal', order: 1,
+    }]);
+    templateApi.createTask.mockResolvedValue({ data: { id: 'created-task' }, error: null });
+    renderWithClient(<MicroTasksWidget widgetId="w1" />);
+    fireEvent.click(screen.getByRole('button', { name: /Группа/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Saved group' }));
+    await waitFor(() => expect(templateApi.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Saved task', goal_id: 'original-goal', group_id: 'new-group', elapsed_seconds: 0,
+    })));
   });
 
   it('позволяет вернуть задачу из завершённых в активные', async () => {

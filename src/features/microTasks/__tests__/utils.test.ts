@@ -55,7 +55,7 @@ describe('microTasks utils', () => {
     const payloads = buildTemplateTaskPayloads({
       items: [
         { title: 'Task A', category_ids: ['cat-1'], order: 2 },
-        { title: 'Task B', category_ids: ['cat-2', 'cat-3'], order: 1 },
+        { title: 'Task B', category_ids: ['cat-2', 'cat-3'], goal_id: 'goal-1', order: 1 },
       ],
       baseOrder: 10,
       groupId: 'group-1',
@@ -65,6 +65,8 @@ describe('microTasks utils', () => {
     expect(payloads[0].insert.group_order).toBe(1);
     expect(payloads[0].insert.elapsed_seconds).toBe(0);
     expect(payloads[0].categoryIds).toEqual(['cat-2', 'cat-3']);
+    expect(payloads[0].insert.goal_id).toBe('goal-1');
+    expect(payloads[1].insert.goal_id).toBeNull();
   });
 
   it('buildGroupReorderUpdates inserts task into group by drop position', () => {

@@ -169,9 +169,10 @@ describe('create + cancel race (Bug G)', () => {
     await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
 
     act(() => {
-      result.current.create.mutate({ title: 'Keep me' });
+      result.current.create.mutate({ title: 'Keep me', goal_id: 'goal-1' });
     });
     await waitFor(() => expect(readCache(qc).some((t) => t.id.startsWith('temp-'))).toBe(true));
+    expect(readCache(qc).find((t) => t.id.startsWith('temp-'))?.goal_id).toBe('goal-1');
 
     await act(async () => {
       mocks.state.resolveClassify?.([]);
@@ -182,6 +183,7 @@ describe('create + cancel race (Bug G)', () => {
       expect(mocks.createMicroTaskMock).toHaveBeenCalledTimes(1);
       expect(mocks.serverRows).toHaveLength(1);
       expect(mocks.serverRows[0].title).toBe('Keep me');
+      expect(mocks.serverRows[0].goal_id).toBe('goal-1');
     });
   });
 });

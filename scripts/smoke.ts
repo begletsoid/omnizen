@@ -104,6 +104,7 @@ let goalsWidgetId: string | null = null;
     if (goalsWidgetId && microTasksWidgetId) {
       await runHeatmapSmoke(goalsWidgetId, microTasksWidgetId, userId);
       await runGoalCategoryCascadeSmoke(goalsWidgetId, microTasksWidgetId, userId);
+      await runGroupTemplateGoalSmoke(goalsWidgetId, microTasksWidgetId, userId);
     }
     if (microTasksWidgetId) {
       await runEodCleanupSmoke(microTasksWidgetId, userId);
@@ -943,6 +944,80 @@ async function runHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, use
   }
 
   await runLiveHeatmapSmoke(goalsWidgetId, microWidgetId, userId);
+}
+
+async function runGroupTemplateGoalSmoke(goalsWidgetId: string, microWidgetId: string, userId: string) {
+  if (!supabase) throw new Error('Supabase client missing');
+  const {
+    createMicroTask, createMicroTaskGroup, createMicroTaskGroupTemplate,
+    listMicroTaskGroupTemplateItems, replaceMicroTaskGroupTemplateItems,
+  } = await import('../src/features/microTasks/api');
+  const { buildTemplateTaskPayloads } = await import('../src/features/microTasks/utils');
+  const { data: goal, error: goalError } = await supabase.from('goals').insert({
+    widget_id: goalsWidgetId, user_id: userId, title: 'Template source goal', value: 17,
+  }).select('id').single();
+  if (goalError || !goal) throw goalError ?? new Error('Template smoke goal missing');
+  const { data: source, error: sourceError } = await createMicroTask({
+    widget_id: microWidgetId, user_id: userId, title: 'Template source task',
+    goal_id: goal.id, order: 10, elapsed_seconds: 900, timer_state: 'paused',
+  });
+  if (sourceError || !source) throw sourceError ?? new Error('Template source task missing');
+  const { data: template, error: templateError } = await createMicroTaskGroupTemplate({
+    user_id: userId, name: 'Goal-linked template smoke',
+  });
+  if (templateError || !template) throw templateError ?? new Error('Template missing');
+  const { error: saveError } = await replaceMicroTaskGroupTemplateItems(template.id, [{
+    title: source.title, goal_id: source.goal_id, category_ids: [], order: 1,
+  }]);
+  if (saveError) throw saveError;
+
+  // Identity must survive a rename/archive and a second goal with the old name.
+  const { error: renameError } = await supabase.from('goals').update({
+    title: 'Renamed template source', archived_at: new Date().toISOString(),
+  }).eq('id', goal.id);
+  if (renameError) throw renameError;
+  const { error: otherGoalError } = await supabase.from('goals').insert({
+    widget_id: goalsWidgetId, user_id: userId, title: 'Template source goal', value: 999,
+  });
+  if (otherGoalError) throw otherGoalError;
+  const items = await listMicroTaskGroupTemplateItems(template.id);
+  if (items[0]?.goal_id !== goal.id) throw new Error('Saving a template lost its goal ID');
+  const { data: group, error: groupError } = await createMicroTaskGroup({
+    widget_id: microWidgetId, user_id: userId, name: template.name, order: 10,
+  });
+  if (groupError || !group) throw groupError ?? new Error('Restored group missing');
+  const payload = buildTemplateTaskPayloads({ items, groupId: group.id, baseOrder: 11 })[0];
+  const { data: restored, error: restoreError } = await createMicroTask({
+    ...payload.insert, widget_id: microWidgetId, user_id: userId,
+  });
+  if (restoreError || !restored) throw restoreError ?? new Error('Restored task missing');
+  if (restored.goal_id !== goal.id || Number(restored.elapsed_seconds) !== 0 || restored.is_done) {
+    throw new Error('Restored task must keep the original goal but reset time/completion');
+  }
+  const { error: timeError } = await supabase.from('micro_tasks')
+    .update({ elapsed_seconds: 120, timer_state: 'paused' }).eq('id', restored.id);
+  if (timeError) throw timeError;
+  const day = new Date().toISOString().slice(0, 10);
+  const { data: details, error: detailsError } = await supabase.rpc('get_heatmap_day_details', { p_day: day });
+  if (detailsError) throw detailsError;
+  const detail = details?.find((row: { goal_id: string }) => row.goal_id === goal.id);
+  if (!detail || Number(detail.seconds_today) !== 1020 || Number(detail.points_today) !== 0) {
+    throw new Error('Heatmap must include time of tasks restored from a goal-linked template');
+  }
+
+  const { error: resaveError } = await replaceMicroTaskGroupTemplateItems(template.id, [{
+    title: restored.title, goal_id: restored.goal_id, category_ids: [], order: 1,
+  }]);
+  if (resaveError) throw resaveError;
+  if ((await listMicroTaskGroupTemplateItems(template.id))[0]?.goal_id !== goal.id) {
+    throw new Error('Resaving a restored group lost its goal ID');
+  }
+
+  // Deletion clears the remembered link rather than silently rebinding by title.
+  const { error: deleteError } = await supabase.from('goals').delete().eq('id', goal.id);
+  if (deleteError) throw deleteError;
+  const cleared = await listMicroTaskGroupTemplateItems(template.id);
+  if (cleared[0]?.goal_id !== null) throw new Error('Deleting a goal must unlink saved template items');
 }
 
 async function runLiveHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, userId: string) {

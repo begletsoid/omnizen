@@ -63,6 +63,7 @@ export function parseDurationInput(value: string): number | null {
 type TemplateItemInput = {
   title: string;
   category_ids: string[];
+  goal_id?: string | null;
   order: number;
 };export function buildTemplateTaskPayloads(params: {
   items: TemplateItemInput[];
@@ -73,6 +74,7 @@ type TemplateItemInput = {
   return sorted.map((item, index) => ({
     insert: {
       title: item.title,
+      goal_id: item.goal_id ?? null,
       order: params.baseOrder + index,
       group_id: params.groupId,
       group_order: index + 1,

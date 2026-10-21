@@ -9,6 +9,7 @@ export type MicroTaskRecord = {
   order: number;
   group_id?: string | null;
   group_order?: number | null;
+  goal_id?: string | null;
   elapsed_seconds: number;
   timer_state: MicroTaskTimerState;
   last_started_at: string | null;
@@ -121,6 +122,7 @@ export type MicroTaskGroup = {
   template_id: string;
   title: string;
   category_ids: string[];
+  goal_id?: string | null;
   order: number;
   created_at: string;
 };export type MicroTaskGroupOrderUpdatePayload = Pick<MicroTaskGroup, 'id' | 'order'>;export type MicroTaskGroupTaskUpdatePayload = {

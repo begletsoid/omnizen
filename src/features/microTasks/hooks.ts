@@ -557,6 +557,7 @@ export function useCreateMicroTask(widgetId: string | null) {
         order: nextOrder,
         group_id: variables.group_id ?? null,
         group_order: variables.group_order ?? null,
+        goal_id: variables.goal_id ?? null,
         elapsed_seconds: 0,
         timer_state: 'never',
         last_started_at: null,
@@ -1725,7 +1726,7 @@ export function useCreateMicroTaskGroupTemplate() {
       items,
     }: {
       name: string;
-      items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order'>>;
+      items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>;
     }) => {
       if (!user) throw new Error('User not authenticated');
       const { data, error } = await createMicroTaskGroupTemplate({ user_id: user.id, name });

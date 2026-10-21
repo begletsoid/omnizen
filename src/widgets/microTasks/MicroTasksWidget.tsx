@@ -529,9 +529,7 @@ export function MicroTasksWidget({
   const handleDuplicateTask = useCallback(
     async (task: MicroTaskRecord) => {
       const categoryIds = task.categories?.map((c) => c.id) ?? [];
-      // Cast: MicroTaskRecord type doesn't list goal_id, but the runtime row
-      // carries it (added in the tasks-widget migration). Read it loosely.
-      const goalId = (task as MicroTaskRecord & { goal_id?: string | null }).goal_id ?? null;
+      const goalId = task.goal_id ?? null;
       const created = await createTaskMutateAsync({
         title: task.title,
         goal_id: goalId,
@@ -925,6 +923,7 @@ export function MicroTasksWidget({
     const items = gTasks.map((t, i) => ({
       title: t.title,
       category_ids: t.categories?.map((c) => c.id) ?? [],
+      goal_id: t.goal_id ?? null,
       order: i + 1,
     }));
     await createGroupTemplate.mutateAsync({ name: group.name, items });
@@ -937,7 +936,7 @@ export function MicroTasksWidget({
     const items = await listMicroTaskGroupTemplateItems(template.id);
     const baseOrder = await fetchNextMicroTaskOrder(widgetId);
     const payloads = buildTemplateTaskPayloads({
-      items: items.map((item) => ({ title: item.title, category_ids: item.category_ids, order: item.order })),
+      items,
       baseOrder,
       groupId: groupData.id,
     });
