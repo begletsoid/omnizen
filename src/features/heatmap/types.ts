@@ -6,7 +6,7 @@ export type HeatmapDayStats = {
   day: string;
   /** Total points earned on this day across all completed goals. */
   points: number;
-  /** Total seconds spent on goal-linked micro tasks on this day. */
+  /** Total seconds on goal-linked micro tasks, including running timers. */
   seconds: number;
 };
 
@@ -18,8 +18,8 @@ export type HeatmapDayDetail = {
   value: number;
   /** Points attributed to this day for this goal (only set for completed goals). */
   points_today: number;
-  /** Seconds logged on this day for micro tasks linked to this goal. */
+  /** Seconds on this day for linked micro tasks, including running timers. */
   seconds_today: number;
-  /** Seconds logged in total across history for micro tasks linked to this goal. */
+  /** Total seconds across history for linked micro tasks, including running timers. */
   seconds_total: number;
 };

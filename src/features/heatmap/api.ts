@@ -10,7 +10,8 @@ function requireSupabase() {
  * Aggregate per-day stats for [from, to] inclusive.
  * Computed server-side on the fly — no denormalized table to keep in sync.
  * "Points" are the per-day share of `goals.value` for completed goals, distributed
- * proportionally to time on each day; "seconds" covers ALL goal-linked micro tasks.
+ * proportionally to time on each day; "seconds" covers ALL goal-linked micro tasks,
+ * including the current unpaused portion of running timers.
  */
 export async function fetchHeatmapPeriodStats(from: string, to: string): Promise<HeatmapDayStats[]> {
   const client = requireSupabase();

@@ -941,6 +941,90 @@ async function runHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, use
   if (secondsTotal !== 21600) {
     throw new Error(`Day1 details expected 21600s total, got ${secondsTotal}`);
   }
+
+  await runLiveHeatmapSmoke(goalsWidgetId, microWidgetId, userId);
+}
+
+async function runLiveHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, userId: string) {
+  if (!supabase) throw new Error('Supabase client missing');
+  const day = new Date().toISOString().slice(0, 10);
+  const { data: goal, error: goalError } = await supabase.from('goals').insert({
+    widget_id: goalsWidgetId, user_id: userId, title: 'Live heatmap smoke',
+    value: 11, is_done: false, sort_order: 2,
+  }).select('id').single();
+  if (goalError || !goal) throw goalError ?? new Error('Live heatmap goal missing');
+  const { data: task, error: taskError } = await supabase.from('micro_tasks').insert({
+    widget_id: microWidgetId, user_id: userId, goal_id: goal.id,
+    title: 'Still working', order: 5, is_done: false, elapsed_seconds: 0,
+    timer_state: 'running', last_started_at: new Date(Date.now() - 120_000).toISOString(),
+  }).select('id').single();
+  if (taskError || !task) throw taskError ?? new Error('Live heatmap task missing');
+
+  const readPeriod = async () => {
+    const { data, error } = await supabase.rpc('get_heatmap_period', { p_from: day, p_to: day });
+    if (error) throw error;
+    const row = data?.find((entry: { day: string }) => entry.day === day);
+    if (!row) throw new Error('Running task with zero saved seconds is missing from heatmap');
+    return { points: Number(row.points), seconds: Number(row.seconds) };
+  };
+  const readDetails = async () => {
+    const { data, error } = await supabase.rpc('get_heatmap_day_details', { p_day: day });
+    if (error) throw error;
+    const row = data?.find((entry: { goal_id: string }) => entry.goal_id === goal.id);
+    if (!row) throw new Error('Running task is missing from heatmap day details');
+    return { points: Number(row.points_today), seconds: Number(row.seconds_today), total: Number(row.seconds_total) };
+  };
+
+  const live = await readPeriod();
+  const details = await readDetails();
+  if (live.points !== 0 || live.seconds < 120 || details.points !== 0 ||
+      details.seconds < 120 || details.total !== details.seconds) {
+    throw new Error(`Open goal must have live time but no coins: ${JSON.stringify({ live, details })}`);
+  }
+  // Reading live time must not save it: pausing would then double-count it.
+  const { data: unchanged, error: readError } = await supabase.from('micro_tasks')
+    .select('elapsed_seconds,timer_state').eq('id', task.id).single();
+  if (readError) throw readError;
+  if (Number(unchanged?.elapsed_seconds) !== 0 || unchanged?.timer_state !== 'running') {
+    throw new Error('Heatmap aggregation mutated the running timer');
+  }
+
+  // Advance the running session without waiting in real time.
+  const { error: advanceError } = await supabase.from('micro_tasks').update({
+    last_started_at: new Date(Date.now() - 240_000).toISOString(),
+  }).eq('id', task.id);
+  if (advanceError) throw advanceError;
+  const advanced = await readPeriod();
+  if (advanced.seconds < 240 || advanced.seconds <= live.seconds) {
+    throw new Error('Running heatmap time did not advance before task completion');
+  }
+
+  const { error: closeError } = await supabase.from('goals').update({ is_done: true }).eq('id', goal.id);
+  if (closeError) throw closeError;
+  const completed = await readPeriod();
+  const completedDetails = await readDetails();
+  if (completed.points !== 11 || completedDetails.points !== 11 || completed.seconds < 240) {
+    throw new Error('Completed goal must distribute coins using the still-running micro-task');
+  }
+
+  const { data: paused, error: pauseError } = await supabase.rpc('pause_micro_task_timer', { p_task_id: task.id });
+  if (pauseError) throw pauseError;
+  const savedSeconds = Number(paused.elapsed_seconds);
+  const afterPause = await readPeriod();
+  const pausedDetails = await readDetails();
+  if (afterPause.seconds !== savedSeconds || pausedDetails.seconds !== savedSeconds ||
+      pausedDetails.total !== savedSeconds || paused.is_done !== false) {
+    throw new Error('Paused incomplete task must retain its time exactly once in both heatmap RPCs');
+  }
+
+  const { error: archiveError } = await supabase.from('micro_tasks').update({
+    is_done: true, archived_at: new Date().toISOString(),
+  }).eq('id', task.id);
+  if (archiveError) throw archiveError;
+  const archived = await readPeriod();
+  if (archived.seconds !== savedSeconds || archived.points !== 11) {
+    throw new Error('Archiving a micro-task must preserve heatmap history');
+  }
 }
 
 async function runAnalyticsSmoke(userId: string) {

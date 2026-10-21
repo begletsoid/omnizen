@@ -11,7 +11,7 @@ import {
 } from '@floating-ui/react';
 import clsx from 'clsx';
 
-import { useHeatmapDayDetails, useHeatmapPeriodStats } from '../../features/heatmap/hooks';
+import { useHeatmapDayDetails, useHeatmapPeriodStats, useHeatmapToday } from '../../features/heatmap/hooks';
 import {
   computeHeatmapMetrics,
   computeIntensityBucket,
@@ -88,7 +88,7 @@ function formatHumanDate(day: string): string {
 export function HeatmapWidget({ config, onUpdateConfig }: HeatmapWidgetProps) {
   const from = readFrom(config);
   const mode = readMode(config);
-  const today = toDayKey(new Date());
+  const today = useHeatmapToday();
 
   const { data: stats = [], isLoading, isError } = useHeatmapPeriodStats(from, today);
 
