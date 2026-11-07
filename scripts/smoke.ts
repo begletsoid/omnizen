@@ -108,6 +108,7 @@ let goalsWidgetId: string | null = null;
     }
     if (microTasksWidgetId) {
       await runEodCleanupSmoke(microTasksWidgetId, userId);
+      await runManualDayFinishSmoke(bootstrap.dashboard.id, userId);
     }
     await runLayoutReorderSmoke(bootstrap.dashboard.id);
 
@@ -949,27 +950,27 @@ async function runHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, use
 async function runGroupTemplateGoalSmoke(goalsWidgetId: string, microWidgetId: string, userId: string) {
   if (!supabase) throw new Error('Supabase client missing');
   const {
-    createMicroTask, createMicroTaskGroup, createMicroTaskGroupTemplate,
-    listMicroTaskGroupTemplateItems, replaceMicroTaskGroupTemplateItems,
+    createMicroTask, createMicroTaskGroup, deleteMicroTaskGroup,
+    listMicroTaskGroupTemplateItems, saveMicroTaskGroupTemplate,
   } = await import('../src/features/microTasks/api');
   const { buildTemplateTaskPayloads } = await import('../src/features/microTasks/utils');
   const { data: goal, error: goalError } = await supabase.from('goals').insert({
     widget_id: goalsWidgetId, user_id: userId, title: 'Template source goal', value: 17,
   }).select('id').single();
   if (goalError || !goal) throw goalError ?? new Error('Template smoke goal missing');
-  const { data: source, error: sourceError } = await createMicroTask({
+  const name = 'Goal-linked template smoke';
+  const { data: originalGroup, error: originalGroupError } = await createMicroTaskGroup({
+    widget_id: microWidgetId, user_id: userId, name, order: 9,
+  });
+  if (originalGroupError || !originalGroup) throw originalGroupError ?? new Error('Original group missing');
+  const { error: sourceError } = await createMicroTask({
     widget_id: microWidgetId, user_id: userId, title: 'Template source task',
-    goal_id: goal.id, order: 10, elapsed_seconds: 900, timer_state: 'paused',
+    goal_id: goal.id, group_id: originalGroup.id, order: 10, elapsed_seconds: 900, timer_state: 'paused',
   });
-  if (sourceError || !source) throw sourceError ?? new Error('Template source task missing');
-  const { data: template, error: templateError } = await createMicroTaskGroupTemplate({
-    user_id: userId, name: 'Goal-linked template smoke',
-  });
-  if (templateError || !template) throw templateError ?? new Error('Template missing');
-  const { error: saveError } = await replaceMicroTaskGroupTemplateItems(template.id, [{
-    title: source.title, goal_id: source.goal_id, category_ids: [], order: 1,
-  }]);
-  if (saveError) throw saveError;
+  if (sourceError) throw sourceError;
+  const template = await saveMicroTaskGroupTemplate(originalGroup.id);
+  const { error: removeGroupError } = await deleteMicroTaskGroup(originalGroup.id);
+  if (removeGroupError) throw removeGroupError;
 
   // Identity must survive a rename/archive and a second goal with the old name.
   const { error: renameError } = await supabase.from('goals').update({
@@ -1005,11 +1006,9 @@ async function runGroupTemplateGoalSmoke(goalsWidgetId: string, microWidgetId: s
     throw new Error('Heatmap must include time of tasks restored from a goal-linked template');
   }
 
-  const { error: resaveError } = await replaceMicroTaskGroupTemplateItems(template.id, [{
-    title: restored.title, goal_id: restored.goal_id, category_ids: [], order: 1,
-  }]);
-  if (resaveError) throw resaveError;
-  if ((await listMicroTaskGroupTemplateItems(template.id))[0]?.goal_id !== goal.id) {
+  const savedAgain = await saveMicroTaskGroupTemplate(group.id);
+  const replacedItems = await listMicroTaskGroupTemplateItems(template.id);
+  if (savedAgain.id !== template.id || replacedItems.length !== 1 || replacedItems[0].goal_id !== goal.id) {
     throw new Error('Resaving a restored group lost its goal ID');
   }
 
@@ -1018,6 +1017,60 @@ async function runGroupTemplateGoalSmoke(goalsWidgetId: string, microWidgetId: s
   if (deleteError) throw deleteError;
   const cleared = await listMicroTaskGroupTemplateItems(template.id);
   if (cleared[0]?.goal_id !== null) throw new Error('Deleting a goal must unlink saved template items');
+}
+
+async function runManualDayFinishSmoke(dashboardId: string, userId: string) {
+  if (!supabase) throw new Error('Supabase client missing');
+  const { finishMicroTaskDay, saveMicroTaskGroupTemplate, listMicroTaskGroupTemplateItems } =
+    await import('../src/features/microTasks/api');
+  const { data: widgets, error: widgetError } = await supabase.from('widgets')
+    .insert(Array.from({ length: 2 }, () => ({ dashboard_id: dashboardId, type: 'tasks' }))).select('id');
+  if (widgetError || widgets?.length !== 2) throw widgetError ?? new Error('Manual cleanup widgets missing');
+  const [{ id: widgetId }, otherWidget] = widgets;
+  const { data: groups, error: groupError } = await supabase.from('micro_task_groups')
+    .insert([
+      { user_id: userId, widget_id: widgetId, name: 'Manual cleanup group' },
+      { user_id: userId, widget_id: widgetId, name: 'Manual cleanup empty group' },
+      { user_id: userId, widget_id: otherWidget.id, name: 'Untouched group' },
+    ]).select('id');
+  if (groupError || !groups || groups.length !== 3) throw groupError ?? new Error('Manual cleanup groups missing');
+  const [group, emptyGroup, otherGroup] = groups;
+  const archivedAt = new Date(Date.now() - 60_000).toISOString();
+  const common = { user_id: userId, widget_id: widgetId, group_id: group.id, timer_state: 'paused', is_done: false };
+  const { data: tasks, error: taskError } = await supabase.from('micro_tasks')
+    .insert([
+      { ...common, title: 'Zero seconds', elapsed_seconds: 0 },
+      { ...common, title: 'Four seconds', elapsed_seconds: 4, group_id: null, is_done: true },
+      { ...common, title: 'Five seconds', elapsed_seconds: 5 },
+      { ...common, title: 'Live time', elapsed_seconds: 0, timer_state: 'running',
+        last_started_at: new Date(Date.now() - 7_000).toISOString() },
+      { ...common, title: 'Existing archive', elapsed_seconds: 4, archived_at: archivedAt },
+      { ...common, title: 'Other widget task', widget_id: otherWidget.id, group_id: otherGroup.id, elapsed_seconds: 0 },
+    ]).select('id,title');
+  if (taskError || !tasks || tasks.length !== 6) throw taskError ?? new Error('Manual cleanup tasks missing');
+  const saved = await saveMicroTaskGroupTemplate(group.id);
+  const result = await finishMicroTaskDay(widgetId);
+  if (result.tasks_archived !== 2 || result.tasks_deleted !== 2 || result.groups_deleted !== 2) {
+    throw new Error(`Manual cleanup counts mismatch: ${JSON.stringify(result)}`);
+  }
+  const { data: rows, error: readError } = await supabase.from('micro_tasks')
+    .select('title,elapsed_seconds,archived_at,is_done,timer_state,last_started_at,group_id').in('id', tasks.map(t => t.id));
+  if (readError || !rows || rows.length !== 4) throw readError ?? new Error('Manual cleanup retained wrong tasks');
+  const five = rows.find(t => t.title === 'Five seconds');
+  const live = rows.find(t => t.title === 'Live time');
+  if (!five?.archived_at || !five.is_done || Number(five.elapsed_seconds) !== 5 || five.group_id !== null
+    || !live?.archived_at || !live.is_done || Number(live.elapsed_seconds) < 7
+    || live.timer_state !== 'paused' || live.last_started_at !== null
+    || Date.parse(rows.find(t => t.title === 'Existing archive')?.archived_at ?? '') !== Date.parse(archivedAt)
+    || rows.find(t => t.title === 'Other widget task')?.group_id !== otherGroup.id) {
+    throw new Error('Manual cleanup must keep the threshold, settle the timer and leave other data intact');
+  }
+  const { data: remainingGroups, error: groupsError } = await supabase.from('micro_task_groups')
+    .select('id').in('id', [group.id, emptyGroup.id, otherGroup.id]);
+  if (groupsError || remainingGroups?.length !== 1 || remainingGroups[0].id !== otherGroup.id
+    || (await listMicroTaskGroupTemplateItems(saved.id)).length !== 3) {
+    throw groupsError ?? new Error('Manual cleanup must remove current groups and preserve saved templates');
+  }
 }
 
 async function runLiveHeatmapSmoke(goalsWidgetId: string, microWidgetId: string, userId: string) {
@@ -1223,25 +1276,7 @@ run().catch((err) => {
   const message =
     typeof err === 'object' && err && 'message' in err ? String((err as { message?: unknown }).message) : error.message;
 
-  if (code === '23514' && message.includes('widgets_type_check')) {
-    console.warn(
-      'Smoke test skipped: backend schema не обновлено (widgets_type_check). Примените новые миграции и повторите.',
-    );
-    process.exit(0);
-  }
-  if (
-    message.includes('micro_task_groups') ||
-    message.includes('micro_task_group_templates') ||
-    message.includes('micro_task_group_template_items') ||
-    message.includes('group_id') ||
-    message.includes('group_order')
-  ) {
-    console.warn(
-      'Smoke test skipped: backend schema не обновлено (micro task groups). Примените новые миграции и повторите.',
-    );
-    process.exit(0);
-  }
-  console.error('Smoke test failed');
+  console.error('Smoke test failed:', code ?? '', message);
   console.error(error);
   process.exit(1);
 });

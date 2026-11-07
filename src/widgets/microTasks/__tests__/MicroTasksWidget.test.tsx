@@ -21,6 +21,7 @@ const updateCategoryColorMock = createMutationMock();
 const reorderItemsMock = { mutate: vi.fn() };
 const createGroupTemplateMock = { mutateAsync: vi.fn() };
 const createGroupMock = { mutateAsync: vi.fn() };
+const finishDayMock = { mutate: vi.fn(), isPending: false, isError: false };
 const templateApi = vi.hoisted(() => ({ items: vi.fn(), createTask: vi.fn() }));
 
 vi.mock('../../../stores/authStore', () => ({
@@ -49,6 +50,7 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useUpdateMicroTaskGroup: () => ({ mutateAsync: vi.fn() }),
   useDeleteMicroTaskGroup: () => ({ mutateAsync: vi.fn() }),
   useCreateMicroTaskGroupTemplate: () => createGroupTemplateMock,
+  useFinishMicroTaskDay: () => finishDayMock,
   useDeleteMicroTaskGroupTemplate: () => ({ mutate: vi.fn() }),
   useUpdateMicroTask: () => updateTaskMock,
   useDeleteMicroTask: () => ({ mutateAsync: vi.fn() }),
@@ -124,6 +126,8 @@ describe('MicroTasksWidget', () => {
     reorderItemsMock.mutate.mockReset();
     createGroupTemplateMock.mutateAsync.mockReset();
     createGroupMock.mutateAsync.mockReset();
+    finishDayMock.mutate.mockReset();
+    finishDayMock.isPending = false;
     templateApi.items.mockReset();
     templateApi.createTask.mockReset();
   });
@@ -235,7 +239,7 @@ describe('MicroTasksWidget', () => {
     expect(screen.getByText('Task 1')).toBeTruthy();
   });
 
-  it('сохраняет шаблон группы без ошибки при дубле имени', async () => {
+  it('сохраняет шаблон по идентификатору группы', async () => {
     mockGroupsState.data = [buildGroup('group-1', 1)];
     mockTasksState.data = [
       { ...buildTask('task-0', 1), group_id: 'group-1', group_order: 1, goal_id: 'goal-1' },
@@ -247,11 +251,20 @@ describe('MicroTasksWidget', () => {
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      expect(createGroupTemplateMock.mutateAsync).toHaveBeenCalledWith({
-        name: 'Group A',
-        items: [{ title: 'Task 1', category_ids: [], goal_id: 'goal-1', order: 1 }],
-      });
+      expect(createGroupTemplateMock.mutateAsync).toHaveBeenCalledWith('group-1');
     });
+  });
+
+  it('завершает день из заголовка и блокирует повторный запуск до ответа', () => {
+    const { rerender } = renderWithClient(<MicroTasksWidget widgetId="w1" />);
+    const button = screen.getByRole('button', { name: 'Завершить день' });
+    fireEvent.click(button);
+    expect(finishDayMock.mutate).toHaveBeenCalledTimes(1);
+    finishDayMock.isPending = true;
+    rerender(<MicroTasksWidget widgetId="w1" />);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(button);
+    expect(finishDayMock.mutate).toHaveBeenCalledTimes(1);
   });
 
   it('восстанавливает связь с целью при создании группы из памяти', async () => {

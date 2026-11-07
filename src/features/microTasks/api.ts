@@ -75,6 +75,14 @@ export async function deleteMicroTaskGroup(id: string) {
   return client.from('micro_task_groups').delete().eq('id', id);
 }
 
+export async function finishMicroTaskDay(widgetId: string) {
+  const { data, error } = await requireSupabase()
+    .rpc('finish_micro_task_day', { p_widget_id: widgetId })
+    .single<{ tasks_archived: number; tasks_deleted: number; groups_deleted: number }>();
+  if (error) throw error;
+  return data;
+}
+
 export async function listMicroTaskGroupTemplates(userId: string) {
   const client = requireSupabase();
   const { data, error } = await client
@@ -97,46 +105,11 @@ export async function listMicroTaskGroupTemplateItems(templateId: string) {
   return (data ?? []) as MicroTaskGroupTemplateItem[];
 }
 
-export async function createMicroTaskGroupTemplate(payload: Pick<MicroTaskGroupTemplate, 'user_id' | 'name'>) {
-  const client = requireSupabase();
-  return client
-    .from('micro_task_group_templates')
-    .upsert(payload, { onConflict: 'user_id,name' })
-    .select('*')
-    .single();
-}
-
-export async function createMicroTaskGroupTemplateItems(
-  templateId: string,
-  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>,
-) {
-  const client = requireSupabase();
-  if (!items.length) return { data: [], error: null };
-  return client
-    .from('micro_task_group_template_items')
-    .insert(
-      items.map((item) => ({
-        template_id: templateId,
-        title: item.title,
-        category_ids: item.category_ids,
-        goal_id: item.goal_id ?? null,
-        order: item.order,
-      })),
-    )
-    .select('*');
-}
-
-export async function replaceMicroTaskGroupTemplateItems(
-  templateId: string,
-  items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>,
-) {
-  const client = requireSupabase();
-  const { error: deleteError } = await client
-    .from('micro_task_group_template_items')
-    .delete()
-    .eq('template_id', templateId);
-  if (deleteError) throw deleteError;
-  return createMicroTaskGroupTemplateItems(templateId, items);
+export async function saveMicroTaskGroupTemplate(groupId: string): Promise<MicroTaskGroupTemplate> {
+  const { data, error } = await requireSupabase()
+    .rpc('save_micro_task_group_template', { p_group_id: groupId });
+  if (error) throw error;
+  return data;
 }
 
 export async function deleteMicroTaskGroupTemplate(templateId: string, userId: string) {

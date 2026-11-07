@@ -12,7 +12,8 @@ import {
   classifyMicrotaskCategories,
   createMicroTask,
   createMicroTaskGroup,
-  createMicroTaskGroupTemplate,
+  saveMicroTaskGroupTemplate,
+  finishMicroTaskDay,
   archiveTaskCategory,
   archiveTaskTag,
   createTaskCategory,
@@ -33,7 +34,6 @@ import {
   listTaskCategories,
   listMicroTaskGroupTemplateItems,
   listMicroTaskGroupTemplates,
-  replaceMicroTaskGroupTemplateItems,
   listTaskTags,
   pauseMicroTaskTimer,
   reorderMicroTasks,
@@ -438,6 +438,7 @@ export function useCreateMicroTask(widgetId: string | null) {
   const { data: bufferedCategoryIds } = useTaskCategoryBuffer(user?.id ?? null);
 
   return useMutation({
+    mutationKey: ['microTaskPlacement', widgetId],
     mutationFn: async (payload: CreateMicroTaskPayload) => {
       if (!widgetId) throw new Error('Widget id missing');
       if (!user) throw new Error('User not authenticated');
@@ -914,6 +915,7 @@ export function useReorderMicroTaskItems(widgetId: string | null) {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: ['microTaskPlacement', widgetId],
     mutationFn: ({
       taskUpdates,
       groupUpdates,
@@ -1721,23 +1723,29 @@ export function useCreateMicroTaskGroupTemplate() {
   const user = useAuthStore((state) => state.user);
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({
-      name,
-      items,
-    }: {
-      name: string;
-      items: Array<Pick<MicroTaskGroupTemplateItem, 'title' | 'category_ids' | 'order' | 'goal_id'>>;
-    }) => {
-      if (!user) throw new Error('User not authenticated');
-      const { data, error } = await createMicroTaskGroupTemplate({ user_id: user.id, name });
-      if (error) throw error;
-      const template = data as MicroTaskGroupTemplate;
-      const { error: itemsError } = await replaceMicroTaskGroupTemplateItems(template.id, items);
-      if (itemsError) throw itemsError;
-      return template;
+    mutationFn: saveMicroTaskGroupTemplate,
+    onSuccess: (template) => {
+      void queryClient.invalidateQueries({ queryKey: ['microTaskGroupTemplates', user?.id] });
+      void queryClient.invalidateQueries({ queryKey: ['microTaskGroupTemplateItems', template.id] });
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['microTaskGroupTemplates', user?.id] });
+  });
+}
+
+export function useFinishMicroTaskDay(widgetId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!widgetId) throw new Error('Widget id missing');
+      return finishMicroTaskDay(widgetId);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        ['microTasks', widgetId],
+        ['microTaskGroups', widgetId],
+        ['goals'],
+        ['heatmap'],
+        ['quickSwitcher'],
+      ].map((queryKey) => queryClient.invalidateQueries({ queryKey })));
     },
   });
 }

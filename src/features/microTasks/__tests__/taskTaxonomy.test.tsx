@@ -54,6 +54,7 @@ vi.mock('../../../features/microTasks/hooks', () => ({
   useUpdateMicroTaskGroup: () => updateGroupMutation,
   useDeleteMicroTaskGroup: () => deleteGroupMutation,
   useCreateMicroTaskGroupTemplate: () => createGroupTemplateMutation,
+  useFinishMicroTaskDay: () => ({ isPending: false, isError: false, mutate: vi.fn() }),
   useDeleteMicroTaskGroupTemplate: () => deleteGroupTemplateMutation,
   useUpdateMicroTask: () => updateMicroTaskMutation,
   useDeleteMicroTask: () => deleteMicroTaskMutation,

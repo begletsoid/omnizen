@@ -63,7 +63,5 @@ export type RecurringGoalInsert = {
   widget_id: string;
   user_id?: string;
   title: string;
-  value?: number;
-  expected_hours?: number;
   cron_expression: string;
 };

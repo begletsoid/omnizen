@@ -130,8 +130,6 @@ export function TasksWidget({ widgetId }: TasksWidgetProps) {
           if (!dup) {
             const newGoal = await createGoalAsync({
               title: recurringGoal.title,
-              value: recurringGoal.value,
-              expected_hours: recurringGoal.expected_hours,
               is_recurring: true,
             });
             if (microTasksWidgetIdRef.current && newGoal?.id) {

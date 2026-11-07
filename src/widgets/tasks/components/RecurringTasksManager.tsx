@@ -23,61 +23,6 @@ const getReferenceElement = (ref: ReferenceType | null): Element | null => {
   return ref.contextElement ?? null;
 };
 
-const SPIN_HIDE =
-  '[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none';
-
-/**
- * Numeric input that doesn't auto-reset to 0 while you're clearing it. Plain
- * `parseInt(e.target.value) || 0` jumps the field back to "0" the moment you
- * Backspace through the last digit, which makes editing painful. Instead, we
- * track a string draft while the input is focused and only commit a clean
- * number on blur (or on every valid keystroke). Empty / NaN states are kept
- * visually empty until the user leaves the field.
- */
-function NumericField({
-  value,
-  onChange,
-  step,
-  title,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  step?: number;
-  title?: string;
-}) {
-  const [draft, setDraft] = useState(String(value));
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (!focused) setDraft(String(value));
-  }, [value, focused]);
-
-  return (
-    <input
-      type="number"
-      min={0}
-      step={step}
-      value={focused ? draft : value}
-      onChange={(e) => {
-        setDraft(e.target.value);
-        const n = step ? parseFloat(e.target.value) : parseInt(e.target.value);
-        if (!isNaN(n) && n >= 0) onChange(n);
-      }}
-      onFocus={() => {
-        setFocused(true);
-        setDraft(String(value));
-      }}
-      onBlur={() => {
-        setFocused(false);
-        const n = step ? parseFloat(draft) : parseInt(draft);
-        if (!isNaN(n) && n >= 0) onChange(n);
-      }}
-      className={`w-10 rounded bg-white/5 px-1 py-0.5 text-center text-xs text-text outline-none focus:bg-white/10 ${SPIN_HIDE}`}
-      title={title}
-    />
-  );
-}
-
 type RecurringTasksManagerProps = {
   widgetId: string | null;
 };
@@ -85,10 +30,6 @@ type RecurringTasksManagerProps = {
 export function RecurringTasksManager({ widgetId }: RecurringTasksManagerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
-  // String state for the "new" draft fields so the user can clear them without
-  // them snapping to 0 mid-edit. Parsed to number on commit.
-  const [newValue, setNewValue] = useState('0');
-  const [newHours, setNewHours] = useState('1');
   const [newCron, setNewCron] = useState('0 9 * * 1');
 
   const { data: recurringGoals = [] } = useRecurringGoals(widgetId);
@@ -120,17 +61,13 @@ export function RecurringTasksManager({ widgetId }: RecurringTasksManagerProps) 
     if (!title) return;
     await createMutation.mutateAsync({
       title,
-      value: parseInt(newValue) || 0,
-      expected_hours: parseFloat(newHours) || 0,
       cron_expression: newCron,
     });
     setNewTitle('');
-    setNewValue('0');
-    setNewHours('1');
     setNewCron('0 9 * * 1');
   };
 
-  const handleFieldUpdate = async (rg: RecurringGoalRecord, field: string, value: string | number) => {
+  const handleFieldUpdate = async (rg: RecurringGoalRecord, field: 'title' | 'cron_expression', value: string) => {
     await updateMutation.mutateAsync({ id: rg.id, [field]: value });
   };
 
@@ -168,24 +105,12 @@ export function RecurringTasksManager({ widgetId }: RecurringTasksManagerProps) 
                   <input
                     value={rg.title}
                     onChange={(e) => handleFieldUpdate(rg, 'title', e.target.value)}
-                    className="flex-1 bg-transparent text-xs text-white outline-none"
-                  />
-                  <NumericField
-                    value={rg.value}
-                    onChange={(v) => handleFieldUpdate(rg, 'value', v)}
-                    title="Ценность"
-                  />
-                  <span className="text-muted">/</span>
-                  <NumericField
-                    value={rg.expected_hours}
-                    onChange={(v) => handleFieldUpdate(rg, 'expected_hours', v)}
-                    step={0.5}
-                    title="Часы"
+                    className="min-w-0 flex-1 bg-transparent text-xs text-white outline-none"
                   />
                   <input
                     value={rg.cron_expression}
                     onChange={(e) => handleFieldUpdate(rg, 'cron_expression', e.target.value)}
-                    className={`w-24 rounded bg-white/5 px-1 py-0.5 text-center text-xs outline-none ${isValidCron(rg.cron_expression) ? 'text-text' : 'text-rose-400'}`}
+                    className={`w-24 shrink-0 rounded bg-white/5 px-1 py-0.5 text-center text-xs outline-none ${isValidCron(rg.cron_expression) ? 'text-text' : 'text-rose-400'}`}
                     title="Cron-выражение"
                   />
                   <button
@@ -205,32 +130,12 @@ export function RecurringTasksManager({ widgetId }: RecurringTasksManagerProps) 
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
                 placeholder="Новая периодическая задача"
-                className="flex-1 bg-transparent text-xs text-white outline-none placeholder:text-muted"
-              />
-              <input
-                type="number"
-                min={0}
-                value={newValue}
-                onChange={(e) => setNewValue(e.target.value)}
-                onBlur={() => { if (newValue === '' || isNaN(Number(newValue))) setNewValue('0'); }}
-                className={`w-10 rounded bg-white/5 px-1 py-0.5 text-center text-xs text-text outline-none focus:bg-white/10 ${SPIN_HIDE}`}
-                title="Ценность"
-              />
-              <span className="text-muted">/</span>
-              <input
-                type="number"
-                min={0}
-                step={0.5}
-                value={newHours}
-                onChange={(e) => setNewHours(e.target.value)}
-                onBlur={() => { if (newHours === '' || isNaN(Number(newHours))) setNewHours('1'); }}
-                className={`w-10 rounded bg-white/5 px-1 py-0.5 text-center text-xs text-text outline-none focus:bg-white/10 ${SPIN_HIDE}`}
-                title="Часы"
+                className="min-w-0 flex-1 bg-transparent text-xs text-white outline-none placeholder:text-muted"
               />
               <input
                 value={newCron}
                 onChange={(e) => setNewCron(e.target.value)}
-                className={`w-24 rounded bg-white/5 px-1 py-0.5 text-center text-xs outline-none ${isValidCron(newCron) ? 'text-text' : 'text-rose-400'}`}
+                className={`w-24 shrink-0 rounded bg-white/5 px-1 py-0.5 text-center text-xs outline-none ${isValidCron(newCron) ? 'text-text' : 'text-rose-400'}`}
                 title="Cron"
               />
               <button

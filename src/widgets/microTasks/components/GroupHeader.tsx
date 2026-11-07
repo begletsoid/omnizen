@@ -17,6 +17,7 @@ export type GroupHeaderProps = {
   onEditCommit: () => void;
   onEditCancel: () => void;
   onSaveTemplate: () => void;
+  isSaveDisabled?: boolean;
   onDeleteGroup: () => void;
 };
 
@@ -33,6 +34,7 @@ export function GroupHeader({
   onEditCancel,
   onEditStart,
   onSaveTemplate,
+  isSaveDisabled,
   onDeleteGroup,
 }: GroupHeaderProps) {
   return (
@@ -71,7 +73,8 @@ export function GroupHeader({
       <button
         type="button"
         onClick={onSaveTemplate}
-        className="text-xs text-white/50 transition hover:text-white/70"
+        disabled={isSaveDisabled}
+        className="text-xs text-white/50 transition hover:text-white/70 disabled:opacity-50"
         aria-label="Сохранить группу как шаблон"
       >
         <SaveIcon className="h-3.5 w-3.5" />

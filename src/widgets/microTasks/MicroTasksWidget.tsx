@@ -18,7 +18,7 @@ import {
   type ReferenceType,
 } from '@floating-ui/react';
 import clsx from 'clsx';
-import { useQueryClient } from '@tanstack/react-query';
+import { useIsMutating, useQueryClient } from '@tanstack/react-query';
 
 import {
   useAcknowledgeCategoriesIntroduction,
@@ -37,6 +37,7 @@ import {
   useDeleteMicroTask,
   useDeleteTaskCategory,
   useDeleteTaskTag,
+  useFinishMicroTaskDay,
   useDetachCategoryFromTask,
   useDetachTagFromCategory,
   useUnarchiveTaskCategory,
@@ -324,6 +325,10 @@ export function MicroTasksWidget({
   const updateGroup = useUpdateMicroTaskGroup(widgetId);
   const deleteGroupMutation = useDeleteMicroTaskGroup(widgetId);
   const createGroupTemplate = useCreateMicroTaskGroupTemplate();
+  const finishDay = useFinishMicroTaskDay(widgetId);
+  const placementPending = useIsMutating({ mutationKey: ['microTaskPlacement', widgetId] }) > 0;
+  const [isRestoringGroup, setIsRestoringGroup] = useState(false);
+  const [groupActionError, setGroupActionError] = useState<string | null>(null);
   const deleteGroupTemplate = useDeleteMicroTaskGroupTemplate();
   const updateTask = useUpdateMicroTask(widgetId);
   const deleteTask = useDeleteMicroTask(widgetId);
@@ -351,7 +356,7 @@ export function MicroTasksWidget({
     if (!widgetId) return;
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail?.targetWidgetId !== widgetId) return;
+      if (detail?.targetWidgetId !== widgetId || finishDay.isPending) return;
       const goal = detail.goal as { id?: string; title?: string; categories?: Array<{ id: string }> } | undefined;
       if (!goal?.title) return;
       const goalCategoryIds = goal.categories?.map((c) => c.id).filter(Boolean) ?? [];
@@ -363,7 +368,7 @@ export function MicroTasksWidget({
     };
     window.addEventListener('cross-widget-drop', handler);
     return () => window.removeEventListener('cross-widget-drop', handler);
-  }, [widgetId, createTask]);
+  }, [widgetId, createTask, finishDay.isPending]);
   const updateCategoryColor = useUpdateTaskCategoryColor();
   const updateCategoryDescription = useUpdateTaskCategoryDescription();
 
@@ -864,7 +869,7 @@ export function MicroTasksWidget({
   };
 
   const handleAddTask = async () => {
-    if (!widgetId) return;
+    if (!widgetId || finishDay.isPending) return;
     const title = newTaskTitle.trim();
     if (!title) return;
     // Clear the input BEFORE awaiting the mutation: the LLM-classify +
@@ -880,7 +885,7 @@ export function MicroTasksWidget({
   };
 
   const handleCreateGroup = async () => {
-    if (!widgetId) return;
+    if (!widgetId || finishDay.isPending) return;
     await createGroup.mutateAsync({ name: 'Новая группа', order: maxEntryOrder + 1 });
   };
 
@@ -919,35 +924,39 @@ export function MicroTasksWidget({
   };
 
   const handleSaveGroupTemplate = async (group: MicroTaskGroup) => {
-    const gTasks = groupTasksMap.get(group.id) ?? [];
-    const items = gTasks.map((t, i) => ({
-      title: t.title,
-      category_ids: t.categories?.map((c) => c.id) ?? [],
-      goal_id: t.goal_id ?? null,
-      order: i + 1,
-    }));
-    await createGroupTemplate.mutateAsync({ name: group.name, items });
+    setGroupActionError(null);
+    try {
+      await createGroupTemplate.mutateAsync(group.id);
+    } catch (error) {
+      console.warn('Failed to save micro-task group', error);
+      setGroupActionError('Не удалось сохранить группу. Попробуй ещё раз.');
+    }
   };
 
   const handleCreateGroupFromTemplate = async (template: { id: string; name: string }) => {
-    if (!widgetId || !user) return;
-    const order = maxEntryOrder + 1;
-    const groupData = await createGroup.mutateAsync({ name: template.name, order });
-    const items = await listMicroTaskGroupTemplateItems(template.id);
-    const baseOrder = await fetchNextMicroTaskOrder(widgetId);
-    const payloads = buildTemplateTaskPayloads({
-      items,
-      baseOrder,
-      groupId: groupData.id,
-    });
-    for (const payload of payloads) {
-      const insertPayload = Object.assign({}, payload.insert, { widget_id: widgetId, user_id: user.id });
-      const { data, error } = await createMicroTask(insertPayload);
-      if (error) throw error;
-      if (payload.categoryIds?.length) await attachCategoriesToTask(data.id, payload.categoryIds, user.id);
+    if (!widgetId || !user || finishDay.isPending || isRestoringGroup) return;
+    setIsRestoringGroup(true);
+    setGroupActionError(null);
+    try {
+      const items = await listMicroTaskGroupTemplateItems(template.id);
+      const baseOrder = await fetchNextMicroTaskOrder(widgetId);
+      const groupData = await createGroup.mutateAsync({ name: template.name, order: maxEntryOrder + 1 });
+      const payloads = buildTemplateTaskPayloads({ items, baseOrder, groupId: groupData.id });
+      for (const payload of payloads) {
+        const { data, error } = await createMicroTask({ ...payload.insert, widget_id: widgetId, user_id: user.id });
+        if (error) throw error;
+        if (payload.categoryIds?.length) await attachCategoriesToTask(data.id, payload.categoryIds, user.id);
+      }
+    } catch (error) {
+      console.warn('Failed to restore micro-task group', error);
+      setGroupActionError('Не удалось полностью восстановить группу.');
+    } finally {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] }),
+        queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] }),
+      ]);
+      setIsRestoringGroup(false);
     }
-    await queryClient.invalidateQueries({ queryKey: ['microTasks', widgetId] });
-    await queryClient.invalidateQueries({ queryKey: ['microTaskGroups', widgetId] });
   };
 
   const handleToggleDone = async (task: MicroTaskRecord) => {
@@ -1081,116 +1090,130 @@ export function MicroTasksWidget({
 
   const ready = e2eMode || Boolean(widgetId);
 
-  const renderTaskCard = useCallback(
-    (task: MicroTaskRecord, itemId: string) => {
-      const isTaskRunning = effectiveRunningId === task.id;
-      const seconds = taskSecondsMap.get(task.id) ?? computeTaskSeconds(task, isTaskRunning);
-      const isDragging = dragState?.draggedId === itemId;
-      const isTransferSource = transferState?.sourceTaskId === task.id;
-      const isTransferTarget =
-        transferState !== null &&
-        transferState.hoveredTargetId === task.id &&
-        transferState.sourceTaskId !== task.id;
-      // While dragging time off this row, the timer label tracks the
-      // committed seconds minus what the user is requesting (clamped to
-      // what's actually available). For running tasks we add the live
-      // delta back so the per-second tick continues to flow.
-      let timeLabelOverride: string | undefined;
-      if (isTransferSource && transferState) {
-        const liveSec = computeAvailableSecondsOnSource(
-          transferState.sourceCommittedSeconds,
-          transferState.sourceTimerState,
-          transferState.sourceLastStartedAt,
-          Date.now(),
-        );
-        const requestedSec = Math.min(
-          transferRequestedMinutes * 60,
-          liveSec,
-        );
-        const previewSec = Math.max(0, liveSec - requestedSec);
-        timeLabelOverride = formatDuration(previewSec);
-      } else if (isTransferTarget && transferEffectiveMinutes > 0) {
-        // Visual reciprocal — hovering target shows the boosted value.
-        timeLabelOverride = formatDuration(seconds + transferEffectiveMinutes * 60);
-      }
-      return (
-        <MicroTaskCard
-          key={task.id}
-          dataTaskId={task.id}
-          task={task}
-          seconds={seconds}
-          isRunning={isTaskRunning}
-          isDragging={isDragging}
-          cardRef={(el) => registerRef(itemId, el)}
-          onPointerDown={(e) => handlePointerDown(itemId, e)}
-          onToggleTimer={() => handleToggleTimer(task)}
-          onToggleDone={() => handleToggleDone(task)}
-          onDelete={() => handleDelete(task)}
-          onArchive={() => handleArchiveTask(task)}
-          isArchiving={archiveTask.isPending && archiveTask.variables === task.id}
-          onTimeClick={() => handleStartEditingTime(task)}
-          onTimerPointerDown={(e) => transferDrag.beginPress(task.id, e)}
-          timeLabelOverride={timeLabelOverride}
-          isTransferSource={isTransferSource}
-          isTransferTarget={isTransferTarget}
-          onTimeChange={(value) => { setTimeDraft(value); setIsTimeInvalid(false); }}
-          onTimeCommit={() => handleCommitEditingTime(task)}
-          onTimeCancel={() => { setEditingTimeTaskId(null); setTimeDraft(''); setIsTimeInvalid(false); setIsTimeSaving(false); }}
-          isEditing={editingTask?.id === task.id}
-          editValue={editingTask?.id === task.id ? editingTask.value : ''}
-          onEditStart={() => setEditingTask({ id: task.id, value: task.title })}
-          onEditChange={(value) => setEditingTask((prev) => prev && prev.id === task.id ? { ...prev, value } : prev)}
-          onEditCommit={async () => {
-            if (!editingTask) return;
-            const trimmed = editingTask.value.trim();
-            if (trimmed && trimmed !== task.title) await updateTask.mutateAsync({ id: task.id, title: trimmed });
-            setEditingTask(null);
-          }}
-          onEditCancel={() => setEditingTask(null)}
-          taskCategories={taskCategories}
-          onAttachCategory={(categoryId) => handleAttachCategory(task, categoryId)}
-          onDetachCategory={(categoryId) => handleDetachCategory(task, categoryId)}
-          onAcknowledgeIntroduction={() => {
-            // Idempotent on the server side; we also skip locally if the
-            // task already has a timestamp set so we don't spam mutations.
-            if (task.id.startsWith('temp-')) return;
-            if (task.categories_introduced_at) return;
-            acknowledgeIntroduction.mutate(task.id);
-          }}
-          isEditingTime={editingTimeTaskId === task.id}
-          timeDraft={editingTimeTaskId === task.id ? timeDraft : ''}
-          isTimeInvalid={isTimeInvalid}
-          isTimeSaving={isTimeSaving}
-        />
+  const renderTaskCard = (task: MicroTaskRecord, itemId: string) => {
+    const isTaskRunning = effectiveRunningId === task.id;
+    const seconds = taskSecondsMap.get(task.id) ?? computeTaskSeconds(task, isTaskRunning);
+    const isDragging = dragState?.draggedId === itemId;
+    const isTransferSource = transferState?.sourceTaskId === task.id;
+    const isTransferTarget =
+      transferState !== null &&
+      transferState.hoveredTargetId === task.id &&
+      transferState.sourceTaskId !== task.id;
+    // While dragging time off this row, the timer label tracks the
+    // committed seconds minus what the user is requesting (clamped to
+    // what's actually available). For running tasks we add the live
+    // delta back so the per-second tick continues to flow.
+    let timeLabelOverride: string | undefined;
+    if (isTransferSource && transferState) {
+      const liveSec = computeAvailableSecondsOnSource(
+        transferState.sourceCommittedSeconds,
+        transferState.sourceTimerState,
+        transferState.sourceLastStartedAt,
+        Date.now(),
       );
-    },
-    [effectiveRunningId, taskSecondsMap, computeTaskSeconds, editingTask, editingTimeTaskId, timeDraft, isTimeInvalid, isTimeSaving, taskCategories, archiveTask.isPending, archiveTask.variables, dragState, registerRef, handlePointerDown, transferDrag, transferState, transferEffectiveMinutes, transferRequestedMinutes, acknowledgeIntroduction],
-  );
+      const requestedSec = Math.min(
+        transferRequestedMinutes * 60,
+        liveSec,
+      );
+      const previewSec = Math.max(0, liveSec - requestedSec);
+      timeLabelOverride = formatDuration(previewSec);
+    } else if (isTransferTarget && transferEffectiveMinutes > 0) {
+      // Visual reciprocal — hovering target shows the boosted value.
+      timeLabelOverride = formatDuration(seconds + transferEffectiveMinutes * 60);
+    }
+    return (
+      <MicroTaskCard
+        key={task.id}
+        dataTaskId={task.id}
+        task={task}
+        seconds={seconds}
+        isRunning={isTaskRunning}
+        isDragging={isDragging}
+        cardRef={(el) => registerRef(itemId, el)}
+        onPointerDown={(e) => handlePointerDown(itemId, e)}
+        onToggleTimer={() => handleToggleTimer(task)}
+        onToggleDone={() => handleToggleDone(task)}
+        onDelete={() => handleDelete(task)}
+        onArchive={() => handleArchiveTask(task)}
+        isArchiving={archiveTask.isPending && archiveTask.variables === task.id}
+        onTimeClick={() => handleStartEditingTime(task)}
+        onTimerPointerDown={(e) => transferDrag.beginPress(task.id, e)}
+        timeLabelOverride={timeLabelOverride}
+        isTransferSource={isTransferSource}
+        isTransferTarget={isTransferTarget}
+        onTimeChange={(value) => { setTimeDraft(value); setIsTimeInvalid(false); }}
+        onTimeCommit={() => handleCommitEditingTime(task)}
+        onTimeCancel={() => { setEditingTimeTaskId(null); setTimeDraft(''); setIsTimeInvalid(false); setIsTimeSaving(false); }}
+        isEditing={editingTask?.id === task.id}
+        editValue={editingTask?.id === task.id ? editingTask.value : ''}
+        onEditStart={() => setEditingTask({ id: task.id, value: task.title })}
+        onEditChange={(value) => setEditingTask((prev) => prev && prev.id === task.id ? { ...prev, value } : prev)}
+        onEditCommit={async () => {
+          if (!editingTask) return;
+          const trimmed = editingTask.value.trim();
+          if (trimmed && trimmed !== task.title) await updateTask.mutateAsync({ id: task.id, title: trimmed });
+          setEditingTask(null);
+        }}
+        onEditCancel={() => setEditingTask(null)}
+        taskCategories={taskCategories}
+        onAttachCategory={(categoryId) => handleAttachCategory(task, categoryId)}
+        onDetachCategory={(categoryId) => handleDetachCategory(task, categoryId)}
+        onAcknowledgeIntroduction={() => {
+          // Idempotent on the server side; we also skip locally if the
+          // task already has a timestamp set so we don't spam mutations.
+          if (task.id.startsWith('temp-')) return;
+          if (task.categories_introduced_at) return;
+          acknowledgeIntroduction.mutate(task.id);
+        }}
+        isEditingTime={editingTimeTaskId === task.id}
+        timeDraft={editingTimeTaskId === task.id ? timeDraft : ''}
+        isTimeInvalid={isTimeInvalid}
+        isTimeSaving={isTimeSaving}
+      />
+    );
+  };
 
   return (
     <section ref={(el) => { dropZoneRef.current = el; }} className="flex flex-col gap-4 rounded-[2.5rem] border border-white/10 bg-background/40 px-4 py-4">
       {/* Header: taxonomy + group buttons + timers */}
       <header className="flex flex-col gap-3 text-sm text-muted sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-2">
-          <button
-            type="button"
-            ref={managerRefs.setReference}
-            onClick={() => setIsManagerOpen((prev) => !prev)}
-            disabled={!widgetId}
-            className={clsx(
-              'inline-flex w-fit items-center gap-1 rounded-full border border-white/20 px-2.5 py-1 text-xs transition',
-              widgetId ? 'hover:border-white/40 hover:text-white' : 'opacity-50',
-            )}
-            aria-label="Управление тегами и категориями"
-          >
-            <span aria-hidden="true"><TagIcon className="h-4 w-4 text-white/70" /></span>
-            <span aria-hidden="true">⚙️</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              ref={managerRefs.setReference}
+              onClick={() => setIsManagerOpen((prev) => !prev)}
+              disabled={!widgetId}
+              className={clsx(
+                'inline-flex w-fit items-center gap-1 rounded-full border border-white/20 px-2.5 py-1 text-xs transition',
+                widgetId ? 'hover:border-white/40 hover:text-white' : 'opacity-50',
+              )}
+              aria-label="Управление тегами и категориями"
+            >
+              <span aria-hidden="true"><TagIcon className="h-4 w-4 text-white/70" /></span>
+              <span aria-hidden="true">⚙️</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => { setIsGroupMenuOpen(false); finishDay.mutate(); }}
+              disabled={!widgetId || e2eMode || isLoading || isError || finishDay.isPending
+                || placementPending || isRestoringGroup || createGroup.isPending || createGroupTemplate.isPending
+                || updateTask.isPending || toggleTimer.isPending || transferTime.isPending
+                || (!tasks.length && !effectiveGroups.length)}
+              aria-label="Завершить день"
+              title="Завершить день"
+              className="inline-flex items-center rounded-full border border-white/20 px-2.5 py-1 text-white/70 transition hover:border-white/40 hover:text-white disabled:opacity-50"
+            >
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                <path d="m5 12 4 4L19 6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
           <button
             type="button"
             ref={groupMenuRefs.setReference}
             onClick={() => setIsGroupMenuOpen((prev) => !prev)}
-            disabled={!widgetId}
+            disabled={!widgetId || finishDay.isPending}
             className={clsx(
               'inline-flex w-fit items-center gap-2 rounded-full border border-white/20 px-2.5 py-1 text-xs transition',
               widgetId ? 'hover:border-white/40 hover:text-white' : 'opacity-50',
@@ -1233,6 +1256,8 @@ export function MicroTasksWidget({
           />
         </div>
       </header>
+      {finishDay.isError && <p role="alert" className="text-xs text-rose-300">Не удалось завершить день. Попробуй ещё раз.</p>}
+      {groupActionError && <p role="alert" className="text-xs text-rose-300">{groupActionError}</p>}
 
       {/* Group Menu Popover */}
       {isGroupMenuOpen && (
@@ -1247,7 +1272,7 @@ export function MicroTasksWidget({
                   {filteredTemplates.length === 0 && <p className="px-2 py-2 text-xs text-muted">Нет сохранённых групп.</p>}
                   {filteredTemplates.map((template) => (
                     <div key={template.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-2 py-1.5">
-                      <button type="button" onClick={() => handleCreateGroupFromTemplate(template)} className="flex-1 text-left text-xs text-white/80 hover:text-white">{template.name}</button>
+                      <button type="button" disabled={isRestoringGroup} onClick={() => handleCreateGroupFromTemplate(template)} className="flex-1 text-left text-xs text-white/80 hover:text-white disabled:opacity-50">{template.name}</button>
                       <button type="button" onClick={() => { if (window.confirm(`Удалить группу «${template.name}»?`)) deleteGroupTemplate.mutate(template.id); }}
                         className="text-xs text-white/50 hover:text-rose-300" aria-label={`Удалить шаблон ${template.name}`}>✕</button>
                     </div>
@@ -1638,6 +1663,7 @@ export function MicroTasksWidget({
                       onEditCommit={() => handleCommitGroupName(group)}
                       onEditCancel={() => { setEditingGroupId(null); setEditingGroupName(''); }}
                       onSaveTemplate={() => handleSaveGroupTemplate(group)}
+                      isSaveDisabled={placementPending || isRestoringGroup || finishDay.isPending || createGroupTemplate.isPending}
                       onDeleteGroup={() => handleDeleteGroup(group)}
                     />
                   </div>,
@@ -1713,10 +1739,11 @@ export function MicroTasksWidget({
 
       {/* Add task input */}
       <div className="flex justify-center">
-        <div className="flex items-center gap-2 rounded-full border border-accent/50 bg-accent/10 px-4 py-1">
+        <div className="flex max-w-full items-center gap-2 rounded-full border border-accent/50 bg-accent/10 px-4 py-1">
           <input value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') handleAddTask(); }}
-            placeholder="Новая микрозадача" className="w-36 bg-transparent text-sm text-text outline-none placeholder:text-muted" />
+            disabled={finishDay.isPending}
+            placeholder="Новая микрозадача" className="w-72 min-w-0 bg-transparent text-sm text-text outline-none placeholder:text-muted" />
           <button type="button" onClick={handleAddTask} className="text-xl text-accent transition hover:text-accent/80" aria-label="Добавить задачу">+</button>
         </div>
       </div>
